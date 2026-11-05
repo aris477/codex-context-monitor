@@ -308,8 +308,12 @@ export class UsageStore {
     const files = [];
     const warnings = [];
     const canonicalIds = new Map();
-    const fileKey = (value) => process.platform === "win32" ? path.resolve(value).toLowerCase() : path.resolve(value);
-    for (const label of threadLabelsByHome(homes).values()) {
+    const labels = threadLabelsByHome(homes);
+    const fileKey = (value) => {
+      const resolved = path.resolve(value).replace(/\.jsonl\.zst$/, '.jsonl');
+      return process.platform === "win32" ? resolved.replace(/^\\\\\?\\/, '').toLowerCase() : resolved;
+    };
+    for (const label of labels.values()) {
       if (label.rolloutPath) canonicalIds.set(fileKey(label.rolloutPath), label.id);
     }
     for (const home of homes) {
@@ -318,8 +322,19 @@ export class UsageStore {
           files.push({ filePath: home.usageLogPath, source: home, info: await stat(home.usageLogPath) });
           continue;
         }
-        for (const filePath of await discoverSessionFiles(home.path)) {
+        const discovered = await discoverSessionFiles(home.path);
+        const available = new Set(discovered.map(fileKey));
+        const preferred = new Map([...labels.entries()]
+          .filter(([key, label]) => key.startsWith(home.id + '\0') && label.rolloutPath && available.has(fileKey(label.rolloutPath)))
+          .map(([, label]) => [label.id, fileKey(label.rolloutPath)]));
+        for (const filePath of discovered) {
           const sessionIdOverride = canonicalIds.get(fileKey(filePath));
+          // Older resumed rollout snapshots can carry the same session metadata
+          // and cumulative counters. Prefer its available current state-db path.
+          // Explicitly registered forks are always kept, even with a parent's ID
+          // in the filename or copied session_meta.
+          const namedId = path.basename(filePath).match(/-([0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12})(?:_[0-9a-f-]+)?\.jsonl(?:\.zst)?$/i)?.[1];
+          if (!sessionIdOverride && preferred.has(namedId) && preferred.get(namedId) !== fileKey(filePath)) continue;
           files.push({ filePath, source: sessionIdOverride ? { ...home, sessionIdOverride } : home, info: await stat(filePath) });
         }
       } catch (error) {
@@ -413,6 +428,7 @@ export class UsageStore {
     const sourceKind = source.kind || "codex";
     let append = Boolean(
       !force
+      && !filePath.endsWith('.jsonl.zst')
       && existing
       && sourceKind === existing.kind
       && source.id === existing.home_id

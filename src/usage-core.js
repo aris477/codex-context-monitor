@@ -4,6 +4,8 @@ import { readdir, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { createInterface } from "node:readline";
+import { pipeline } from "node:stream";
+import * as zlib from "node:zlib";
 
 import { calculateRequestCost, sumCosts } from "./pricing.js";
 
@@ -267,7 +269,7 @@ async function walkJsonlFiles(root, files = []) {
         continue;
       }
       await walkJsonlFiles(fullPath, files);
-    } else if (entry.isFile() && entry.name.endsWith(".jsonl")) {
+    } else if (entry.isFile() && /\.jsonl(?:\.zst)?$/.test(entry.name)) {
       files.push(fullPath);
     }
   }
@@ -278,7 +280,10 @@ export async function discoverSessionFiles(homePath) {
   const groups = await Promise.all(
     SESSION_DIRS.map((dir) => walkJsonlFiles(path.join(homePath, dir), [])),
   );
-  return groups.flat().sort();
+  const files = groups.flat().sort();
+  const plain = new Set(files.filter((file) => file.endsWith('.jsonl')));
+  // A compressed and plain copy of the same rollout must never count twice.
+  return files.filter((file) => !file.endsWith('.zst') || !plain.has(file.slice(0, -4)));
 }
 
 export async function buildUsageFingerprint(options = {}) {
@@ -331,7 +336,7 @@ export function classifyChannel({ originator, source, homeLabel }) {
 }
 
 function fallbackSessionId(filePath) {
-  const base = path.basename(filePath, ".jsonl");
+  const base = path.basename(filePath).replace(/\.jsonl(?:\.zst)?$/, '');
   return base.replace(/^rollout-/, "") || filePath;
 }
 
@@ -583,9 +588,26 @@ export async function parseSessionTurns(filePath, home = {}) {
   return turns;
 }
 
+function usageReadStream(filePath, start = 0) {
+  const input = createReadStream(filePath, { start });
+  if (!filePath.endsWith('.jsonl.zst')) return input;
+  if (typeof zlib.createZstdDecompress !== 'function') {
+    input.destroy();
+    throw new Error('Reading .jsonl.zst sessions requires Node.js 24 or a runtime with Zstandard support.');
+  }
+  if (start !== 0) {
+    input.destroy();
+    throw new Error('Compressed sessions must be read from the beginning.');
+  }
+  const decoded = zlib.createZstdDecompress();
+  // Forward both file and decompression failures to the consuming async iterator.
+  pipeline(input, decoded, () => {});
+  return decoded;
+}
+
 async function* readJsonlRows(filePath) {
   const lines = createInterface({
-    input: createReadStream(filePath, { encoding: "utf8" }),
+    input: usageReadStream(filePath),
     crlfDelay: Infinity,
   });
 
@@ -738,7 +760,7 @@ function createStringInterner() {
 async function streamCompleteJsonlRows(filePath, startOffset, onRow) {
   let pending = Buffer.alloc(0);
   let completeOffset = startOffset;
-  const input = createReadStream(filePath, { start: startOffset });
+  const input = usageReadStream(filePath, startOffset);
 
   for await (const chunk of input) {
     pending = pending.length ? Buffer.concat([pending, chunk]) : chunk;
