@@ -49,6 +49,24 @@ test('hover, hidden sidebar and title mismatch never substitute another active t
   assert.equal(matchVisualSample(sample(''), candidates, now).status, 'not-a-thread');
 });
 
+test('long titles keep their full identity beyond a shared prefix and reject clipped OCR', () => {
+  const prefix = 'Review a long conversation about API models, configuration, and window automation '.repeat(2);
+  const first = `${prefix}(first conversation)`;
+  const second = `${prefix}(second conversation)`;
+  const sessions = [{ id: 'long-A', name: first }, { id: 'long-B', name: second }];
+  assert.equal(matchVisualSample(sample(first), sessions, now).threadId, 'long-A');
+  assert.equal(matchVisualSample(sample(second), sessions, now).threadId, 'long-B');
+  assert.equal(matchVisualSample(sample(`${prefix.slice(0, 60)}…`), sessions, now).status, 'ambiguous');
+  assert.equal(matchVisualSample({ ...sample(first), selectedRows: [{ text: second, contrast: 12 }] }, sessions, now).status, 'ambiguous');
+});
+
+test('an ellipsis stored in the actual chat name is exact-matched and collisions remain ambiguous', () => {
+  const title = 'A long mixed-language conversation title with API, UIA, OCR, and configuration…';
+  const sessions = [{ id: 'ellipsis-A', name: title }];
+  assert.equal(matchVisualSample(sample(title), sessions, now).threadId, 'ellipsis-A');
+  assert.equal(matchVisualSample(sample(title), [...sessions, { id: 'ellipsis-B', name: title }], now).status, 'ambiguous');
+});
+
 test('old frames, missing windows and other foreground apps clear visual identity', () => {
   for (const s of [
     { ...sample(), observedAt: new Date(now - 4001).toISOString() },

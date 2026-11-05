@@ -117,6 +117,36 @@ public static class VisualReader {
         return result;
     }
     class TextLine { public string text; public double x,y,width,height; public double contrast; internal bool accessible; }
+    static string ReadHeadingLabel(RECT windowRect,Rectangle crop,TextLine line) {
+        if(line==null)return null;
+        try {
+            double x=windowRect.Left+line.x+line.width/2,y=windowRect.Top+line.y+line.height/2;
+            var element=AutomationElement.FromPoint(new System.Windows.Point(x,y));
+            var labels=new HashSet<string>();
+            var documentLabels=new HashSet<string>();
+            for(int depth=0;element!=null && depth<8;depth++,element=TreeWalker.ControlViewWalker.GetParent(element)) {
+                var current=element.Current;var bounds=current.BoundingRectangle;
+                // Only accept the visible title text at the OCR-located heading.
+                // Do not read the embedded monitor's heading.
+                if(current.ControlType==ControlType.Text && !current.IsOffscreen && bounds.Contains(x,y)
+                    && bounds.Left>=windowRect.Left+crop.Left && bounds.Right<=windowRect.Left+crop.Right
+                    && bounds.Top>=windowRect.Top+crop.Top && bounds.Bottom<=windowRect.Top+crop.Bottom
+                    && !String.IsNullOrWhiteSpace(current.Name))labels.Add(current.Name);
+                // Chromium may expose the heading point only as a generic group.
+                // Its full-window document is named after the active chat. Embedded
+                // web documents cannot qualify: they do not cover the app sidebar.
+                if(current.ControlType==ControlType.Document && !current.IsOffscreen
+                    && bounds.Contains(x,y) && bounds.Left<=windowRect.Left+32
+                    && bounds.Top<=windowRect.Top+32
+                    && bounds.Width>=(windowRect.Right-windowRect.Left)*0.9
+                    && bounds.Height>=(windowRect.Bottom-windowRect.Top)*0.9
+                    && !String.IsNullOrWhiteSpace(current.Name))documentLabels.Add(current.Name);
+            }
+            if(labels.Count==1)return labels.First();
+            if(labels.Count==0 && documentLabels.Count==1)return documentLabels.First();
+        } catch { /* Keep OCR as the fallback when accessibility is absent. */ }
+        return null;
+    }
     static void ReadSelectedLabels(IntPtr window,RECT windowRect,int sidebarRight,List<TextLine> rows) {
         if(rows.Count==0)return;
         try {
@@ -134,6 +164,25 @@ public static class VisualReader {
                 if(labels.Count==1) {row.text=labels.First();row.accessible=true;}
             }
         } catch { /* Exact OCR remains the fallback when accessibility is absent. */ }
+        if(rows.All(row=>row.accessible))return;
+        try {
+            // Chromium hit testing sometimes returns a full-window generic group
+            // instead of the sidebar button, especially during title marquee.
+            // Query buttons only on that failure, once per changed-frame OCR pass.
+            var root=AutomationElement.FromHandle(window);
+            var buttons=root.FindAll(TreeScope.Descendants,new PropertyCondition(AutomationElement.ControlTypeProperty,ControlType.Button));
+            foreach(var row in rows.Where(item=>!item.accessible)) {
+                double x=windowRect.Left+row.x+row.width/2,y=windowRect.Top+row.y+row.height/2;
+                var labels=new HashSet<string>();
+                foreach(AutomationElement button in buttons) {
+                    var current=button.Current;var bounds=current.BoundingRectangle;
+                    if(!current.IsOffscreen && bounds.Width>80 && bounds.Left>=windowRect.Left
+                        && bounds.Right<=windowRect.Left+sidebarRight && bounds.Contains(x,y)
+                        && !String.IsNullOrWhiteSpace(current.Name))labels.Add(current.Name);
+                }
+                if(labels.Count==1) {row.text=labels.First();row.accessible=true;}
+            }
+        } catch { /* Retain exact OCR when the accessibility tree is unavailable. */ }
     }
     static object Capture() {
         IntPtr window=GetForegroundWindow(); uint pid; GetWindowThreadProcessId(window,out pid);
@@ -189,7 +238,8 @@ public static class VisualReader {
                 }
             }
             var headingLines=ReadLines(bitmap,titleCrop,hx,hy).Cast<TextLine>().ToList();
-            string heading=headingLines.OrderBy(l=>l.x).Select(l=>l.text).FirstOrDefault()??"";
+            var headingLine=headingLines.OrderBy(l=>l.x).FirstOrDefault();
+            string heading=ReadHeadingLabel(r,titleCrop,headingLine)??(headingLine==null?"":headingLine.text);
             if(GetForegroundWindow()!=window)return Missing("窗口切换中，等待下一次识别");
             lastWindow=window;lastWidth=width;lastHeight=height;lastRight=right;lastLeft=left;
             lastFingerprint=fingerprint;lastTitle=heading;lastRows=selected;lastFullRead=DateTime.UtcNow;
