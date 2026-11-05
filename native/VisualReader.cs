@@ -117,13 +117,12 @@ public static class VisualReader {
         return result;
     }
     class TextLine { public string text; public double x,y,width,height; public double contrast; internal bool accessible; }
-    static string ReadHeadingLabel(RECT windowRect,Rectangle crop,TextLine line) {
-        if(line==null)return null;
+    static string ReadHeadingLabel(IntPtr window,RECT windowRect,Rectangle crop,TextLine line) {
         try {
-            double x=windowRect.Left+line.x+line.width/2,y=windowRect.Top+line.y+line.height/2;
-            var element=AutomationElement.FromPoint(new System.Windows.Point(x,y));
+            double x=windowRect.Left+(line==null?crop.Left+20:line.x+line.width/2);
+            double y=windowRect.Top+(line==null?crop.Top+crop.Height/2:line.y+line.height/2);
+            var element=line==null?null:AutomationElement.FromPoint(new System.Windows.Point(x,y));
             var labels=new HashSet<string>();
-            var documentLabels=new HashSet<string>();
             for(int depth=0;element!=null && depth<8;depth++,element=TreeWalker.ControlViewWalker.GetParent(element)) {
                 var current=element.Current;var bounds=current.BoundingRectangle;
                 // Only accept the visible title text at the OCR-located heading.
@@ -132,18 +131,29 @@ public static class VisualReader {
                     && bounds.Left>=windowRect.Left+crop.Left && bounds.Right<=windowRect.Left+crop.Right
                     && bounds.Top>=windowRect.Top+crop.Top && bounds.Bottom<=windowRect.Top+crop.Bottom
                     && !String.IsNullOrWhiteSpace(current.Name))labels.Add(current.Name);
-                // Chromium may expose the heading point only as a generic group.
-                // Its full-window document is named after the active chat. Embedded
-                // web documents cannot qualify: they do not cover the app sidebar.
-                if(current.ControlType==ControlType.Document && !current.IsOffscreen
-                    && bounds.Contains(x,y) && bounds.Left<=windowRect.Left+32
-                    && bounds.Top<=windowRect.Top+32
-                    && bounds.Width>=(windowRect.Right-windowRect.Left)*0.9
-                    && bounds.Height>=(windowRect.Bottom-windowRect.Top)*0.9
-                    && !String.IsNullOrWhiteSpace(current.Name))documentLabels.Add(current.Name);
             }
             if(labels.Count==1)return labels.First();
-            if(labels.Count==0 && documentLabels.Count==1)return documentLabels.First();
+            if(labels.Count>1)return null;
+            // Chromium point hit testing and document names can be stale after a
+            // failed provider resume. Read the actual header Text inside its own
+            // toolbar instead. Do not trust full-window Document.Name as identity.
+            var root=AutomationElement.FromHandle(window);
+            var texts=root.FindAll(TreeScope.Descendants,new PropertyCondition(AutomationElement.ControlTypeProperty,ControlType.Text));
+            foreach(AutomationElement text in texts) {
+                var current=text.Current;var bounds=current.BoundingRectangle;
+                if(current.IsOffscreen || String.IsNullOrWhiteSpace(current.Name)
+                    || bounds.Left<windowRect.Left+crop.Left || bounds.Right>windowRect.Left+crop.Right
+                    || bounds.Top<windowRect.Top+crop.Top || bounds.Bottom>windowRect.Top+crop.Bottom)continue;
+                var ancestor=TreeWalker.ControlViewWalker.GetParent(text);
+                for(int depth=0;ancestor!=null && depth<6;depth++,ancestor=TreeWalker.ControlViewWalker.GetParent(ancestor)) {
+                    var parent=ancestor.Current;var area=parent.BoundingRectangle;
+                    if(parent.ControlType==ControlType.ToolBar && !parent.IsOffscreen
+                        && area.Contains(bounds.TopLeft) && area.Contains(bounds.BottomRight)) {
+                        labels.Add(current.Name);break;
+                    }
+                }
+            }
+            if(labels.Count==1)return labels.First();
         } catch { /* Keep OCR as the fallback when accessibility is absent. */ }
         return null;
     }
@@ -201,7 +211,9 @@ public static class VisualReader {
             int left=sameLayout&&right==lastRight?lastLeft:Divider(bitmap,(int)(35*u),Math.Min((int)(110*u),right-100),u);
             if(left<0)left=(int)(52*u);
             if(right-left<100*u)return Missing("会话侧栏过窄");
-            int top=(int)(100*u), bottom=height-(int)(32*u);
+            // The final sidebar row extends into the old 32-DIP bottom margin.
+            // Keep its full glyphs and selection band, even at the scroll limit.
+            int top=(int)(100*u), bottom=height-(int)(8*u);
             var sidebar=new Rectangle(left+(int)(12*u),top,right-left-(int)(55*u),bottom-top);
             int hx=right+(int)(20*u),hy=(int)(40*u),hw=Math.Min((int)(550*u),captureWidth-hx-(int)(40*u)),hh=(int)(52*u);
             if(hw<100)return Missing("聊天标题区域不可见");
@@ -239,7 +251,7 @@ public static class VisualReader {
             }
             var headingLines=ReadLines(bitmap,titleCrop,hx,hy).Cast<TextLine>().ToList();
             var headingLine=headingLines.OrderBy(l=>l.x).FirstOrDefault();
-            string heading=ReadHeadingLabel(r,titleCrop,headingLine)??(headingLine==null?"":headingLine.text);
+            string heading=ReadHeadingLabel(window,r,titleCrop,headingLine)??(headingLine==null?"":headingLine.text);
             if(GetForegroundWindow()!=window)return Missing("窗口切换中，等待下一次识别");
             lastWindow=window;lastWidth=width;lastHeight=height;lastRight=right;lastLeft=left;
             lastFingerprint=fingerprint;lastTitle=heading;lastRows=selected;lastFullRead=DateTime.UtcNow;
