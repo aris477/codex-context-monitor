@@ -9,7 +9,7 @@
     "cud": "./src/cli.js"
   },
   "scripts": {
-    "check": "node --check src/cli.js && node --check src/server.js && node --check src/usage-core.js && node --check src/usage-store.js && node --check src/pricing.js && node --check public/app.js",
+    "check": "node --check src/cli.js && node --check src/current-view.js && node --check src/visual-current-view.js && node --check src/server.js && node --check src/usage-core.js && node --check src/usage-store.js && node --check src/pricing.js && node --check public/app.js && node --check public/context-overview.js && node --check local-server.js && node --check stop-local.js",
     "ci": "npm run check && npm test",
     "test": "node --no-warnings --test",
     "export": "node src/static-export.js",

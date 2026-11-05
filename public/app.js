@@ -1309,7 +1309,7 @@ function renderSessionInsights() {
     $("#contextRemaining").textContent = `${formatTokens(context.remaining)} tokens`;
     $("#contextBar").style.width = `${context.percentRemaining}%`;
     $("#contextBar").style.background = context.percentRemaining < 15 ? "#d14" : "var(--green)";
-    $("#contextDetails").textContent = `${context.percentRemaining}% 剩余 · 已用 ${formatTokens(context.used)} / ${formatTokens(context.window)} · 压缩 ${data.summary.compactionCount} 次`;
+    $("#contextDetails").textContent = `${context.percentRemaining}% 参考余量 · 最近输入 ${formatTokens(context.used)} / ${formatTokens(context.window)} · 疑似压缩 ${data.summary.compactionCount} 次`;
   } else {
     $("#contextRemaining").textContent = "暂无数据";
     $("#contextDetails").textContent = "等待下一个 token_count 事件";
@@ -1792,6 +1792,36 @@ function toggleRankedExpansion(kind) {
 }
 
 function bootDashboard() {
+  let detailsDirty = true;
+  function loadDetails() {
+    detailsDirty = false;
+    return Promise.all([loadSessions(), loadUsage({ skipCheck: true })]).catch((error) => {
+      detailsDirty = true;
+      $("#subtitle").textContent = `加载失败：${error.message}`;
+    });
+  }
+  function showView(view, focus = false) {
+    if (!['monitor', 'analysis', 'settings'].includes(view)) return;
+    for (const panel of document.querySelectorAll('[data-view-panel]')) panel.hidden = panel.dataset.viewPanel !== view;
+    for (const button of document.querySelectorAll('[data-dashboard-view]')) button.setAttribute('aria-pressed', String(button.dataset.dashboardView === view));
+    if (view === 'analysis' && state.summary) render();
+    if (view !== 'monitor' && detailsDirty && !isStaticSnapshot()) void loadDetails();
+    if (focus) {
+      const heading = document.querySelector(`[data-view-panel="${view}"] h2`);
+      heading?.setAttribute('tabindex', '-1');
+      heading?.focus({ preventScroll: true });
+      document.getElementById(`${view}View`)?.scrollIntoView({ block: 'start' });
+    }
+  }
+  document.querySelector('.view-nav')?.addEventListener('click', (event) => {
+    const button = event.target.closest('[data-dashboard-view]');
+    if (button) showView(button.dataset.dashboardView, true);
+  });
+  window.addEventListener('codex-show-view', (event) => showView(event.detail, true));
+  if (isStaticSnapshot()) {
+    document.querySelector('[data-dashboard-view="monitor"]').hidden = true;
+    showView('analysis');
+  }
   setupUsageTooltip();
 
   $("#presetButtons").addEventListener("click", (event) => {
@@ -1938,11 +1968,21 @@ function bootDashboard() {
     setTheme(button.dataset.themeOption);
   });
   window.addEventListener("resize", render);
+  window.addEventListener("codex-context-updated", () => {
+    detailsDirty = true;
+    if (!$("#analysisView").hidden || !$("#settingsView").hidden) void loadDetails();
+  });
+  window.addEventListener("codex-select-session", (event) => {
+    detailsDirty = false;
+    void loadSessions();
+    selectSession(event.detail);
+    $("#sessionSelect").value = state.sessionId;
+  });
   setTheme(preferredTheme(), { persist: false });
   updateRecentControls();
   updateBucketSelect();
   setImportControlsDisabled(isStaticSnapshot());
-  Promise.all([loadSessions(), loadUsage()]).catch((error) => {
+  if (isStaticSnapshot()) Promise.all([loadSessions(), loadUsage()]).catch((error) => {
     $("#subtitle").textContent = `加载失败：${error.message}`;
   });
 }

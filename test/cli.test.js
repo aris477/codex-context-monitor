@@ -196,7 +196,7 @@ test("cli turn defaults to the latest completed turn when a new turn is active",
   assert.match(output, /Turn: turn-cli-1/);
   assert.match(output, /Uncached input: 50/);
   assert.match(output, /API-equivalent cost: \$0\.000765/);
-  assert.match(output, /Context remaining: 258,323 \/ 258,400/);
+  assert.match(output, /Context remaining: 258,340 \/ 258,400/);
 });
 
 test("cli turn --active explicitly prints the current active turn", async () => {

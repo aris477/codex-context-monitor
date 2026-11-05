@@ -6,10 +6,12 @@ import test from "node:test";
 
 import { contextWindowSnapshot, parseSessionTurns } from "../src/usage-core.js";
 
-test("context window matches the Codex 12K-baseline status calculation", () => {
-  const context = contextWindowSnapshot({ total: 133_186 }, 258_400);
+test("context window uses the latest request input with no fixed baseline", () => {
+  const context = contextWindowSnapshot({ input: 133_186, total: 140_000 }, 258_400);
   assert.equal(context.remaining, 125_214);
-  assert.equal(context.percentRemaining, 51);
+  assert.equal(context.percentRemaining, 48);
+  assert.equal(contextWindowSnapshot(null, 258400), null);
+  assert.equal(contextWindowSnapshot({ input: 100 }, 0), null);
 });
 
 test("parseSessionTurns groups request usage, cache misses, cost, and context", async () => {
@@ -30,6 +32,6 @@ test("parseSessionTurns groups request usage, cache misses, cost, and context", 
   assert.equal(turns[0].usage.total, 1010);
   assert.equal(turns[0].cacheMissInput, 200);
   assert.equal(turns[0].cacheHitRate, 0.8);
-  assert.equal(turns[0].context.remaining, 990);
+  assert.equal(turns[0].context.remaining, 1000);
   assert.equal(turns[0].cost.available, true);
 });

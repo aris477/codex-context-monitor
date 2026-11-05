@@ -186,7 +186,14 @@ export async function discoverCodexHomes(options = {}) {
     if (!(await exists(jetbrainsRoot))) {
       continue;
     }
-    for (const entry of await readdir(jetbrainsRoot, { withFileTypes: true })) {
+    let entries;
+    try {
+      entries = await readdir(jetbrainsRoot, { withFileTypes: true });
+    } catch (error) {
+      if (["EACCES", "EPERM", "ENOENT"].includes(error.code)) continue;
+      throw error;
+    }
+    for (const entry of entries) {
       if (!entry.isDirectory()) {
         continue;
       }
@@ -335,22 +342,19 @@ function readTokenUsage(payload) {
   return { cumulative, last, contextWindow: Number(info.model_context_window || 0) };
 }
 
-const CONTEXT_BASELINE_TOKENS = 12_000;
-
 export function contextWindowSnapshot(lastUsage, contextWindow) {
+  if (!lastUsage || !Number.isFinite(lastUsage.input) || lastUsage.input < 0
+    || !Number.isFinite(contextWindow) || contextWindow <= 0) return null;
   const window = Math.max(0, Number(contextWindow || 0));
-  const used = Math.max(0, Number(lastUsage?.total || 0));
+  const used = lastUsage.input;
   const remaining = Math.max(0, window - used);
-  const effectiveWindow = Math.max(0, window - CONTEXT_BASELINE_TOKENS);
-  const effectiveUsed = Math.max(0, used - CONTEXT_BASELINE_TOKENS);
-  const effectiveRemaining = Math.max(0, effectiveWindow - effectiveUsed);
   return {
     window,
     used,
     remaining,
     percentRemaining:
-      effectiveWindow > 0 ? Math.round(Math.max(0, Math.min(1, effectiveRemaining / effectiveWindow)) * 100) : 0,
-    baselineTokens: CONTEXT_BASELINE_TOKENS,
+      Math.round(Math.max(0, Math.min(1, remaining / window)) * 100),
+    method: "last-request-input",
   };
 }
 
@@ -469,7 +473,7 @@ export async function parseSessionFile(filePath, home) {
 
 export async function parseSessionTurns(filePath, home = {}) {
   const meta = {
-    id: fallbackSessionId(filePath),
+    id: home.sessionIdOverride || fallbackSessionId(filePath),
     source: "",
     originator: "",
     cwd: "",
@@ -500,7 +504,7 @@ export async function parseSessionTurns(filePath, home = {}) {
 
   for await (const row of readJsonlRows(filePath)) {
     if (row.type === "session_meta") {
-      meta.id = row.payload?.id || meta.id;
+      meta.id = home.sessionIdOverride || row.payload?.id || meta.id;
       meta.source = row.payload?.source || meta.source;
       meta.originator = row.payload?.originator || meta.originator;
       meta.cwd = row.payload?.cwd || meta.cwd;
@@ -547,12 +551,12 @@ export async function parseSessionTurns(filePath, home = {}) {
       }
       activeTurn.model ||= model;
       addUsage(activeTurn.usage, increment);
-      const context = contextWindowSnapshot(last, contextWindow);
-      const compacted = previousContextUsed !== null && context.used < previousContextUsed;
+      const context = row.payload.info?.last_token_usage?.input_tokens == null ? null : contextWindowSnapshot(last, contextWindow);
+      const compacted = Boolean(context && previousContextUsed !== null && context.used < previousContextUsed);
       if (compacted) {
         activeTurn.compactionCount += 1;
       }
-      previousContextUsed = context.used;
+      previousContextUsed = context?.used ?? null;
       const cost = calculateRequestCost(increment, activeTurn.model || model);
       activeTurn.requests.push({
         timestamp: row.timestamp || activeTurn.startedAt,
@@ -762,7 +766,7 @@ async function streamCompleteJsonlRows(filePath, startOffset, onRow) {
 async function streamSessionUsageFileEvents(filePath, home, onEvent, options = {}) {
   const saved = options.state || {};
   const meta = {
-    id: saved.meta?.id || fallbackSessionId(filePath),
+    id: home.sessionIdOverride || saved.meta?.id || fallbackSessionId(filePath),
     source: saved.meta?.source || "",
     originator: saved.meta?.originator || "",
     cwd: saved.meta?.cwd || "",
@@ -771,6 +775,9 @@ async function streamSessionUsageFileEvents(filePath, home, onEvent, options = {
   let firstAt = saved.firstAt || "";
   let lastAt = saved.lastAt || "";
   let channelOverride = saved.channel || "";
+  let latestContext = saved.latestContext || null;
+  let reasoningEffort = saved.reasoningEffort || "";
+  let includesInheritedHistory = saved.includesInheritedHistory || false;
   let previousCumulative = emptyUsage();
   for (const field of USAGE_FIELDS) {
     previousCumulative[field] = Number(saved.previousCumulative?.[field] || 0);
@@ -783,7 +790,8 @@ async function streamSessionUsageFileEvents(filePath, home, onEvent, options = {
     }
 
     if (row.type === "session_meta") {
-      meta.id = row.payload?.id || meta.id;
+      if (home.sessionIdOverride && row.payload?.id && home.sessionIdOverride !== row.payload.id) includesInheritedHistory = true;
+      meta.id = home.sessionIdOverride || row.payload?.id || meta.id;
       meta.source = row.payload?.source || meta.source;
       meta.originator = row.payload?.originator || meta.originator;
       meta.cwd = row.payload?.cwd || meta.cwd;
@@ -793,6 +801,7 @@ async function streamSessionUsageFileEvents(filePath, home, onEvent, options = {
 
     if (row.type === "turn_context") {
       model = row.payload?.model || model;
+      reasoningEffort = row.payload?.effort || row.payload?.reasoning_effort || "";
       return;
     }
 
@@ -800,7 +809,21 @@ async function streamSessionUsageFileEvents(filePath, home, onEvent, options = {
       return;
     }
 
-    const { cumulative, last } = readTokenUsage(row.payload);
+    const { cumulative, last, contextWindow } = readTokenUsage(row.payload);
+    // This is the last measured request, not cumulative usage or a live memory gauge.
+    // Keep its model/time together so a later model switch cannot relabel an old sample.
+    if (last) {
+      const rawInput = row.payload.info.last_token_usage.input_tokens;
+      latestContext = {
+        input: rawInput == null ? null : last.input,
+        output: last.output,
+        cached: last.cached,
+        window: contextWindow > 0 ? contextWindow : null,
+        at: row.timestamp || lastAt || firstAt,
+        model,
+        reasoningEffort,
+      };
+    }
     let increment = emptyUsage();
     if (cumulative) {
       increment = diffUsage(cumulative, previousCumulative);
@@ -843,6 +866,9 @@ async function streamSessionUsageFileEvents(filePath, home, onEvent, options = {
       lastAt,
       channel: channelOverride,
       previousCumulative,
+      latestContext,
+      reasoningEffort,
+      includesInheritedHistory,
     },
   };
 }

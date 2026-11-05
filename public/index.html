@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Codex Usage</title>
+    <title>Codex Usage · 上下文监控</title>
     <script>
       (() => {
         try {
@@ -19,22 +19,43 @@
   </head>
   <body>
     <main class="shell">
-      <header class="topbar">
-        <div>
-          <h1>Codex Usage</h1>
-          <p id="subtitle">正在扫描本机 Codex 用量...</p>
-          <p id="autoRefreshStatus">按需刷新准备中...</p>
-        </div>
-        <div class="topbar-actions">
-          <div class="theme-toggle" id="themeToggle" role="group" aria-label="主题">
-            <button type="button" data-theme-option="light">浅色</button>
-            <button type="button" data-theme-option="dark">深色</button>
-          </div>
-          <button id="importButton" type="button">导入目录</button>
-          <button id="refreshButton" type="button">强制重扫</button>
-        </div>
+      <header class="topbar monitor-topbar">
+        <div><p class="context-eyebrow">CODEX · LOCAL MONITOR</p><h1>上下文监控</h1></div>
+        <nav class="view-nav" aria-label="主导航">
+          <button type="button" data-dashboard-view="monitor" aria-pressed="true">监控</button>
+          <button type="button" data-dashboard-view="analysis" aria-pressed="false">用量分析</button>
+          <button type="button" data-dashboard-view="settings" aria-pressed="false">设置</button>
+        </nav>
       </header>
-
+      <div id="monitorView" data-view-panel="monitor">
+        <div id="currentSentinel" aria-hidden="true"></div>
+        <section id="currentSession" class="current-session" aria-labelledby="currentTitle">
+          <div id="currentCard"><p class="context-eyebrow">CODEX 当前打开的聊天</p><h2 id="currentTitle">未识别当前聊天</h2><p class="current-message">尚未连接 Codex 当前聊天识别。下方可查看本机对话统计。</p></div>
+        </section>
+        <section id="contextOverview" class="context-overview" aria-labelledby="contextTitle">
+          <div class="context-heading">
+            <h2 id="contextTitle">本机对话</h2>
+            <div class="context-live"><span id="contextLiveDot" class="live-dot"></span><span id="contextStatus" role="status">正在读取统计…</span></div>
+          </div>
+          <div class="context-controls">
+            <input id="contextSearch" type="search" placeholder="搜索名称、项目或模型" aria-label="搜索对话" autocomplete="off" />
+            <select id="contextScope" aria-label="对话范围"><option value="main">对话（代理折叠）</option><option value="all">全部，含代理</option><option value="agents">仅代理</option><option value="recent">24 小时内有活动</option><option value="archived">已归档</option></select>
+            <select id="contextSort" aria-label="对话排序"><option value="lastAt">最近活动</option><option value="context">占用最高</option><option value="total">累计 Token 最多</option></select>
+            <button id="contextRefresh" class="panel-action" type="button">刷新</button>
+          </div>
+          <div class="context-table-wrap">
+            <table class="context-table"><thead><tr><th>对话</th><th>模型</th><th>参考占用</th><th>累计 Token</th><th>最近活动</th></tr></thead>
+              <tbody id="contextRows"><tr><td colspan="5" class="context-empty">首次扫描可能需要一些时间…</td></tr></tbody>
+            </table>
+          </div>
+          <div class="context-footer"><span id="contextCount"></span><div><button id="contextPrev" class="panel-action" type="button">上一页</button><span id="contextPage"></span><button id="contextNext" class="panel-action" type="button">下一页</button></div></div>
+          <details id="agentGroup" class="agent-group" hidden><summary id="agentCount">代理会话</summary><p class="context-note">仅按明确的代理元数据归类；未知类型保留在对话列表。</p><div class="context-table-wrap"><table class="context-table"><tbody id="agentRows"></tbody></table></div><button id="showAllAgents" class="panel-action" type="button">在列表查看全部代理</button></details>
+          <p id="contextWarnings" class="context-note" role="status" hidden></p>
+        </section>
+        <details class="metric-explainer"><summary>这些数字如何计算</summary><p>参考占用 = 最近请求输入 Token ÷ 该次上报窗口，输入已含缓存。累计 Token 是历史消耗，两者分别计算。数值是最近采样，不是实时剩余容量或压缩阈值。分叉对话可能包含继承历史。</p></details>
+      </div>
+      <div id="analysisView" data-view-panel="analysis" hidden>
+        <div class="view-heading"><h2>用量分析</h2><p>这里的会话筛选仅影响分析，不代表 Codex 当前打开的聊天。</p><p id="subtitle">正在扫描本机用量…</p><p id="autoRefreshStatus">准备中…</p></div>
       <section class="toolbar" aria-label="筛选">
         <div class="control-group session-control">
           <label>
@@ -169,7 +190,7 @@
           <p class="insight-note">按公开 API 定价估算，不代表 ChatGPT 套餐实际账单。</p>
         </article>
         <article class="panel insight-card">
-          <div class="panel-heading"><h2>上下文窗口</h2></div>
+          <div class="panel-heading"><h2>上下文参考余量</h2></div>
           <strong id="contextRemaining">-</strong>
           <div class="context-track"><span id="contextBar"></span></div>
           <p id="contextDetails" class="insight-copy"></p>
@@ -234,6 +255,17 @@
         </section>
       </section>
 
+      </div>
+      <div id="settingsView" data-view-panel="settings" hidden>
+        <div class="view-heading"><h2>设置与数据源</h2><p>仅统计本机可读取的 Codex 日志。</p></div>
+        <section class="panel settings-panel">
+          <h2>显示与刷新</h2>
+          <div class="settings-row"><span>外观</span><div class="theme-toggle" id="themeToggle" role="group" aria-label="主题"><button type="button" data-theme-option="light">浅色</button><button type="button" data-theme-option="dark">深色</button></div></div>
+          <label class="settings-row">统计刷新 <select id="contextInterval" aria-label="统计刷新"><option value="5000">每 5 秒</option><option value="10000" selected>每 10 秒</option><option value="30000">每 30 秒</option><option value="0">暂停</option></select></label>
+          <p class="context-note">后台标签页暂停刷新。暂停后可点击监控页的“刷新”手动更新。</p>
+          <div class="settings-row"><span>数据维护</span><div class="topbar-actions"><button id="importButton" type="button">导入目录</button><button id="refreshButton" type="button">强制重扫</button></div></div>
+        </section>
+        <section class="panel settings-panel"><h2>当前聊天识别</h2><p class="context-note">本地启动默认启用 Windows 视觉跟随：截图判断左侧选中颜色，通过 Windows 无障碍文字或 OCR 读取名称，与顶部聊天标题核对后匹配本机会话。请保持 Codex 在前台、侧栏展开且当前行可见；同名、截断或无法确认时显示未识别。截图只在内存中处理，不上传、不保存。</p><p class="context-note">约每 2 秒采样，画面不变时跳过重复识别。所有面板关闭、进入后台或暂停后，连续 10 秒无人请求会释放识别进程；恢复使用时自动唤醒。本地服务仍运行，可用停止脚本退出，也可用 CODEX_CONTEXT_VISUAL=0 启动以关闭视觉跟随。</p></section>
       <section class="panel homes-panel">
         <div class="panel-heading">
           <h2>扫描目录</h2>
@@ -241,6 +273,7 @@
         </div>
         <div id="homeList" class="home-list"></div>
       </section>
+      </div>
     </main>
     <div id="importDialog" class="dialog-backdrop" hidden>
       <section class="dialog" role="dialog" aria-modal="true" aria-labelledby="importDialogTitle">
@@ -268,5 +301,6 @@
     <div id="usageTooltip" class="usage-tooltip" role="tooltip" hidden></div>
 
     <script src="/app.js" type="module"></script>
+    <script src="/context-overview.js" type="module"></script>
   </body>
 </html>

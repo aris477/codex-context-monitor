@@ -113,7 +113,7 @@ test("server serves the dashboard and usage API", async () => {
     assert.equal(turns.turns[0].requestCount, 1);
     assert.equal(turns.turns[0].requests, undefined);
     assert.equal(turns.turns[0].cacheMissInput, 80);
-    assert.equal(turns.summary.latestContext.remaining, 258277);
+    assert.equal(turns.summary.latestContext.remaining, 258300);
     assert.equal(pricing.models["gpt-5.6-sol"].perMillion.output, 30);
     assert.equal(json.summary.totals.total, 123);
     assert.equal(recent.status, 200);

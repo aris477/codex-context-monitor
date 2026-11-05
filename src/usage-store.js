@@ -119,7 +119,7 @@ function threadLabelsByHome(homes) {
         if (!columns.has("id")) {
           continue;
         }
-        const selectable = ["name", "title", "first_user_message", "preview"].filter((column) =>
+        const selectable = ["name", "title", "first_user_message", "preview", "rollout_path"].filter((column) =>
           columns.has(column),
         );
         if (!selectable.length) {
@@ -131,10 +131,12 @@ function threadLabelsByHome(homes) {
         for (const row of rows) {
           const title = row.title || row.first_user_message || row.preview;
           const value = row.name || title;
-          if (typeof value === "string" && value.trim()) {
+          if ((typeof value === "string" && value.trim()) || row.rollout_path) {
             homeLabels.set(row.id, {
+              id: row.id,
               name: compactThreadLabel(row.name),
               title: compactThreadLabel(title),
+              rolloutPath: row.rollout_path || "",
             });
           }
         }
@@ -282,6 +284,12 @@ export class UsageStore {
       `);
     }
     this.database.exec(`PRAGMA user_version = ${STORE_SCHEMA_VERSION}`);
+    if (this.readMeta("context_identity_version") !== "1") {
+      // Rebuild only our derived index when upgrading from metadata-only session IDs.
+      // Original Codex files are never written.
+      this.database.exec("DELETE FROM source_files");
+      this.writeMeta("context_identity_version", "1");
+    }
     this.generatedAt = this.readMeta("generated_at");
     this.fingerprint = this.readMeta("fingerprint");
   }
@@ -299,6 +307,11 @@ export class UsageStore {
   async usageFiles(homes) {
     const files = [];
     const warnings = [];
+    const canonicalIds = new Map();
+    const fileKey = (value) => process.platform === "win32" ? path.resolve(value).toLowerCase() : path.resolve(value);
+    for (const label of threadLabelsByHome(homes).values()) {
+      if (label.rolloutPath) canonicalIds.set(fileKey(label.rolloutPath), label.id);
+    }
     for (const home of homes) {
       try {
         if (home.kind === "project-log" && home.usageLogPath) {
@@ -306,7 +319,8 @@ export class UsageStore {
           continue;
         }
         for (const filePath of await discoverSessionFiles(home.path)) {
-          files.push({ filePath, source: home, info: await stat(filePath) });
+          const sessionIdOverride = canonicalIds.get(fileKey(filePath));
+          files.push({ filePath, source: sessionIdOverride ? { ...home, sessionIdOverride } : home, info: await stat(filePath) });
         }
       } catch (error) {
         warnings.push(`无法读取 ${home.path}: ${error.message}`);
@@ -549,11 +563,16 @@ export class UsageStore {
           FROM source_files WHERE path = ?
         `)
         .get(file.filePath);
-      if (!force && existing && Number(existing.size) === file.info.size && Number(existing.mtime_ms) === file.info.mtimeMs) {
+      let identityChanged = false;
+      if (existing && file.source.sessionIdOverride) {
+        try { identityChanged = JSON.parse(existing.parser_state).meta?.id !== file.source.sessionIdOverride; }
+        catch { identityChanged = true; }
+      }
+      if (!force && !identityChanged && existing && Number(existing.size) === file.info.size && Number(existing.mtime_ms) === file.info.mtimeMs) {
         continue;
       }
       try {
-        await this.updateFile(file, existing, { force });
+        await this.updateFile(file, existing, { force: force || identityChanged });
         updatedFileCount += 1;
       } catch (error) {
         warnings.push(`无法索引 ${file.filePath}: ${error.message}`);
@@ -569,14 +588,14 @@ export class UsageStore {
     const changed = this.fingerprint !== status.fingerprint;
     this.homes = homes;
     this.warnings = warnings;
-    if (changed || force || !this.generatedAt) {
+    if (changed || force || updatedFileCount > 0 || !this.generatedAt) {
       this.generatedAt = new Date().toISOString();
     }
     this.fingerprint = status.fingerprint;
     this.checkedAt = status.checkedAt;
     this.writeMeta("generated_at", this.generatedAt);
     this.writeMeta("fingerprint", this.fingerprint);
-    if (changed || force) {
+    if (changed || force || updatedFileCount > 0) {
       this.summaryCache.clear();
       this.metadataCache = null;
       this.sessionRowsCache = null;
@@ -662,6 +681,58 @@ export class UsageStore {
       });
   }
 
+  visualSessionCandidates() {
+    return [...threadLabelsByHome(this.homes).values()];
+  }
+
+  contextOverview() {
+    const labels = threadLabelsByHome(this.homes);
+    const sessions = new Map(this.listSessions().map((session) => [session.id, { ...session, hasUsage: true }]));
+    const states = this.database.prepare(
+      "SELECT path, home_id, parser_state FROM source_files WHERE kind != 'project-log'",
+    ).all();
+    const seen = new Map();
+    for (const row of states) {
+      let saved;
+      try { saved = JSON.parse(row.parser_state); } catch { continue; }
+      const id = saved.meta?.id;
+      if (!id) continue;
+      const previous = seen.get(id);
+      // Prefer the newest copy if the same session is present in multiple scan roots.
+      if (previous && Date.parse(previous.lastAt || 0) >= Date.parse(saved.lastAt || 0)) continue;
+      seen.set(id, saved);
+      const base = sessions.get(id) || {};
+      const label = labels.get(`${row.home_id}\0${id}`) || {};
+      const sample = saved.latestContext || null;
+      const valid = sample && Number.isFinite(sample.input) && sample.input >= 0
+        && Number.isFinite(sample.window) && sample.window > 0;
+      sessions.set(id, {
+        ...base,
+        id,
+        name: label.name || base.name || "",
+        title: label.title || base.title || "",
+        project: saved.meta.cwd || base.project || "",
+        model: saved.model || base.model || "",
+        reasoningEffort: saved.reasoningEffort || "",
+        includesInheritedHistory: Boolean(saved.includesInheritedHistory),
+        sessionKind: saved.meta.source && typeof saved.meta.source === 'object' && saved.meta.source.subagent ? 'agent' : 'unknown',
+        firstAt: saved.firstAt || base.firstAt || "",
+        lastAt: saved.lastAt || base.lastAt || "",
+        archived: /[\\/]archived_sessions[\\/]/.test(row.path),
+        hasUsage: Boolean(base.hasUsage),
+        total: base.total || usageFromRow(),
+        context: sample ? {
+          ...sample,
+          percentUsed: valid ? sample.input / sample.window * 100 : null,
+          remaining: valid ? Math.max(0, sample.window - sample.input) : null,
+          method: "last-request-input",
+          staleModel: Boolean(sample.model && saved.model && sample.model !== saved.model),
+        } : null,
+      });
+    }
+    return [...sessions.values()].sort((a, b) => Date.parse(b.lastAt || 0) - Date.parse(a.lastAt || 0));
+  }
+
   sessionSource(sessionId) {
     const row = this.database
       .prepare(`
@@ -674,6 +745,7 @@ export class UsageStore {
         FROM event_rollups
         JOIN source_files ON source_files.path = event_rollups.source_path
         WHERE event_rollups.session_id = ?
+        ORDER BY event_rollups.max_timestamp_ms DESC
         LIMIT 1
       `)
       .get(sessionId);

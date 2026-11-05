@@ -1,5 +1,7 @@
 # Codex Usage
 
+> **AI 生成说明：** 本仓库是基于 [PukerWonderLand/codex-usage](https://github.com/PukerWonderLand/codex-usage) 的实验性上下文监控增强版。本增强版的新增与修改代码、测试及部分文档主要由生成式 AI（OpenAI Codex）根据使用者要求生成和迭代；这不表示上游代码由 AI 生成。本项目是独立社区项目，与 OpenAI 无隶属关系，未获其认可或背书。启动方式和本版本统计口径见 [使用说明](使用说明.md)，生成方式及已验证范围见 [AI 生成与验证说明](AI_DISCLOSURE.md)。下文保留上游文档，涉及本增强版的行为时以使用说明为准。
+
 **Linux 联合部署：** [Hook、回答末尾用量报告、systemd 仪表盘与 SMB 对话归档](docs/linux-archive-deployment.md)。
 
 [简体中文](README.md) | [English](README.en.md)

@@ -15,6 +15,8 @@ import {
   summarizeUsage,
 } from "./usage-core.js";
 import { UsageStore } from "./usage-store.js";
+import { readCurrentView } from "./current-view.js";
+import { createWindowsVisualProvider } from "./visual-current-view.js";
 import { MODEL_PRICING, PRICING_VERSION, sumCosts } from "./pricing.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -208,6 +210,10 @@ async function serveStatic(requestPath, response) {
 
 export function createUsageServer(options = {}) {
   const usageStore = new UsageStore(options);
+  const visualProvider = options.visualTracking ? createWindowsVisualProvider({
+    cacheDir: path.join(path.dirname(usageStore.databaseFile), 'visual-runtime'),
+    getCandidates: () => usageStore.visualSessionCandidates(),
+  }) : null;
   let storeStatus = null;
   let syncPromise = null;
   const turnCache = new Map();
@@ -215,7 +221,7 @@ export function createUsageServer(options = {}) {
 
   async function sessionTurns(session) {
     const info = await stat(session.filePath);
-    const fingerprint = `${info.size}:${info.mtimeMs}`;
+    const fingerprint = `input-reference-v1:${info.size}:${info.mtimeMs}`;
     const memoryEntry = turnCache.get(session.id);
     if (memoryEntry?.fingerprint === fingerprint) {
       return memoryEntry.turns;
@@ -224,7 +230,7 @@ export function createUsageServer(options = {}) {
       return turnCachePromises.get(session.id);
     }
     const promise = (async () => {
-      const cacheDir = path.join(options.homeDir || os.homedir(), ".codex-usage", "turn-cache");
+      const cacheDir = options.turnCacheDir || path.join(options.homeDir || os.homedir(), ".codex-usage", "turn-cache");
       const cacheFile = path.join(cacheDir, `${session.id}.json`);
       try {
         const cached = JSON.parse(await readFile(cacheFile, "utf8"));
@@ -236,6 +242,7 @@ export function createUsageServer(options = {}) {
         // Missing or stale caches are rebuilt from only the selected session.
       }
       const turns = await parseSessionTurns(session.filePath, {
+        sessionIdOverride: session.id,
         homeId: session.homeId,
         homeLabel: session.homeLabel,
         homePath: session.homePath,
@@ -286,6 +293,14 @@ export function createUsageServer(options = {}) {
     const url = new URL(request.url || "/", "http://127.0.0.1");
 
     try {
+      if (url.pathname === "/api/current-view") {
+        sendJson(response, 200, await readCurrentView(options.currentViewProvider || visualProvider));
+        return;
+      }
+      if (url.pathname === "/api/monitor-health" && options.monitorIdentity) {
+        sendJson(response, 200, options.monitorIdentity);
+        return;
+      }
       if (url.pathname === "/api/status") {
         const status = await buildUsageFingerprint(await usageOptions(options));
         const since = url.searchParams.get("since") || "";
@@ -457,6 +472,17 @@ export function createUsageServer(options = {}) {
         return;
       }
 
+      if (url.pathname === "/api/context-overview") {
+        const usage = await loadUsageStore({ check: url.searchParams.get("skipCheck") !== "1" });
+        sendJson(response, 200, {
+          checkedAt: usage.checkedAt,
+          fingerprint: usage.fingerprint,
+          sessions: usageStore.contextOverview(),
+          warnings: usageStore.warnings,
+        });
+        return;
+      }
+
       if (url.pathname === "/api/sessions") {
         await loadUsageStore({ check: false });
         sendJson(response, 200, { sessions: usageStore.listSessions() });
@@ -483,6 +509,7 @@ export function createUsageServer(options = {}) {
     }
   });
   server.on("close", () => {
+    visualProvider?.close();
     usageStore.close();
   });
   return server;

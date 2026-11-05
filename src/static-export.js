@@ -34,6 +34,7 @@ export function renderStaticDashboardHtml(report, options = {}) {
   const styles = readFileSync(path.join(PUBLIC_DIR, "styles.css"), "utf8");
   const app = readFileSync(path.join(PUBLIC_DIR, "app.js"), "utf8");
   return indexHtml
+    .replace('<script src="/context-overview.js" type="module"></script>', '')
     .replace('<link rel="stylesheet" href="/styles.css" />', `<style>\n${styles}\n</style>`)
     .replace(
       '<script src="/app.js" type="module"></script>',
