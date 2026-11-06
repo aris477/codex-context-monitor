@@ -25,9 +25,14 @@ public static class VisualReader {
     [DllImport("user32.dll")] static extern bool IsIconic(IntPtr h);
     [DllImport("user32.dll")] static extern uint GetDpiForWindow(IntPtr h);
     [DllImport("user32.dll")] static extern bool SetProcessDpiAwarenessContext(IntPtr value);
+    [DllImport("kernel32.dll",SetLastError=true)] static extern IntPtr OpenProcess(uint access,bool inherit,uint pid);
+    [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)] static extern bool QueryFullProcessImageName(IntPtr process,int flags,StringBuilder path,ref int size);
+    [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr handle);
+    [DllImport("kernel32.dll",EntryPoint="RtlMoveMemory")] static extern void CopyMemory(IntPtr target,IntPtr source,UIntPtr bytes);
     [ComImport, Guid("905a0fef-bc53-11df-8c49-001e4fc686da"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
     interface IBufferByteAccess { void Buffer(out IntPtr value); }
     static OcrEngine engine;
+    static bool engineTried;
     static byte[] lastFingerprint;
     static IntPtr lastWindow;
     static int lastWidth,lastHeight,lastRight,lastLeft;
@@ -38,13 +43,15 @@ public static class VisualReader {
     static JavaScriptSerializer json = new JavaScriptSerializer();
     static object Missing(string reason) { return new { status="unavailable", reason=reason }; }
     static bool IsCodex(uint pid) {
+        IntPtr process=OpenProcess(0x1000,false,pid);
+        if(process==IntPtr.Zero)return false;
         try {
-            using(var process=Process.GetProcessById((int)pid)) {
-              string p = process.MainModule.FileName;
+              var path=new StringBuilder(32768);int length=path.Capacity;
+              if(!QueryFullProcessImageName(process,0,path,ref length))return false;
+              string p=path.ToString();
               return p.IndexOf(@"\WindowsApps\OpenAI.Codex_",StringComparison.OrdinalIgnoreCase)>=0
                 && (Path.GetFileName(p).Equals("ChatGPT.exe",StringComparison.OrdinalIgnoreCase) || Path.GetFileName(p).Equals("Codex.exe",StringComparison.OrdinalIgnoreCase));
-            }
-        } catch { return false; }
+        } finally { CloseHandle(process); }
     }
     static double Luma(Color c) { return (c.R+c.G+c.B)/3.0; }
     static double Median(List<double> values) { values.Sort(); return values[values.Count/2]; }
@@ -78,10 +85,18 @@ public static class VisualReader {
     }
     static byte[] Fingerprint(Bitmap bitmap,Rectangle crop) {
         var data=bitmap.LockBits(crop,ImageLockMode.ReadOnly,PixelFormat.Format32bppArgb);
-        var bytes=new byte[crop.Width*crop.Height*4];
-        try { for(int y=0;y<crop.Height;y++)Marshal.Copy(IntPtr.Add(data.Scan0,y*data.Stride),bytes,y*crop.Width*4,crop.Width*4); }
+        var row=new byte[crop.Width*4];
+        try {
+            using(var hash=SHA256.Create()) {
+                for(int y=0;y<crop.Height;y++) {
+                    Marshal.Copy(IntPtr.Add(data.Scan0,y*data.Stride),row,0,row.Length);
+                    hash.TransformBlock(row,0,row.Length,row,0);
+                }
+                hash.TransformFinalBlock(new byte[0],0,0);
+                return hash.Hash;
+            }
+        }
         finally { bitmap.UnlockBits(data); }
-        using(var hash=SHA256.Create())return hash.ComputeHash(bytes);
     }
     static object Sample(IntPtr window,string heading,List<TextLine> selected,int right,double u,bool cached) {
         return new { status="sample",windowId=window.ToInt64().ToString(),observedAt=DateTime.UtcNow.ToString("o"),title=heading,selectedRows=selected,sidebarRight=right,dpi=u,cached=cached,ocrPasses=ocrPasses,cacheHits=cacheHits };
@@ -95,11 +110,11 @@ public static class VisualReader {
                 g.DrawImage(b,new Rectangle(0,0,part.Width,part.Height),crop,GraphicsUnit.Pixel);
             }
             var data=part.LockBits(new Rectangle(0,0,part.Width,part.Height),ImageLockMode.ReadOnly,PixelFormat.Format32bppArgb);
-            byte[] bytes=new byte[part.Width*part.Height*4];
-            try { for(int y=0;y<part.Height;y++) Marshal.Copy(IntPtr.Add(data.Scan0,y*data.Stride),bytes,y*part.Width*4,part.Width*4); }
+            uint length=checked((uint)(part.Width*part.Height*4));
+            var buffer=new Windows.Storage.Streams.Buffer(length); buffer.Length=length;
+            IntPtr ptr; ((IBufferByteAccess)(object)buffer).Buffer(out ptr);
+            try { for(int y=0;y<part.Height;y++) CopyMemory(IntPtr.Add(ptr,y*part.Width*4),IntPtr.Add(data.Scan0,y*data.Stride),(UIntPtr)(uint)(part.Width*4)); }
             finally { part.UnlockBits(data); }
-            var buffer=new Windows.Storage.Streams.Buffer((uint)bytes.Length); buffer.Length=(uint)bytes.Length;
-            IntPtr ptr; ((IBufferByteAccess)(object)buffer).Buffer(out ptr); Marshal.Copy(bytes,0,ptr,bytes.Length);
             using(var sb=SoftwareBitmap.CreateCopyFromBuffer(buffer,BitmapPixelFormat.Bgra8,part.Width,part.Height,BitmapAlphaMode.Ignore)) {
                 var operation=engine.RecognizeAsync(sb);
                 try {
@@ -196,7 +211,13 @@ public static class VisualReader {
     }
     static object Capture() {
         IntPtr window=GetForegroundWindow(); uint pid; GetWindowThreadProcessId(window,out pid);
-        if(window==IntPtr.Zero || !IsCodex(pid) || IsIconic(window))return Missing("Codex 未在前台，视觉识别暂停");
+        if(window==IntPtr.Zero)return Missing("无法访问 Windows 前台桌面，请通过桌面快捷方式启动面板");
+        if(!IsCodex(pid) || IsIconic(window))return Missing("Codex 未在前台，视觉识别暂停");
+        if(!engineTried) {
+            engineTried=true;
+            try { engine=OcrEngine.TryCreateFromUserProfileLanguages(); if(engine==null)engine=OcrEngine.TryCreateFromLanguage(new Language("zh-Hans-CN")); }catch { }
+        }
+        if(engine==null)return Missing("Windows OCR 语言组件不可用");
         RECT r;if(!GetWindowRect(window,out r))return Missing("无法读取 Codex 窗口");
         int width=r.Right-r.Left,height=r.Bottom-r.Top;
         if(width<500||height<400||width>12000||height>8000)return Missing("Codex 窗口尺寸不适合视觉识别");
@@ -261,8 +282,6 @@ public static class VisualReader {
     [STAThread] public static void Main(string[] args) {
         Console.OutputEncoding=new UTF8Encoding(false);Console.InputEncoding=new UTF8Encoding(false);
         try { SetProcessDpiAwarenessContext(new IntPtr(-4)); } catch { }
-        try { engine=OcrEngine.TryCreateFromUserProfileLanguages(); if(engine==null)engine=OcrEngine.TryCreateFromLanguage(new Language("zh-Hans-CN")); }catch { }
-        if(engine==null) {Console.WriteLine(json.Serialize(Missing("Windows OCR 语言组件不可用")));return;}
         bool once=args.Length>0&&args[0]=="--once";
         do {
             if(!once && Console.ReadLine()==null)break;

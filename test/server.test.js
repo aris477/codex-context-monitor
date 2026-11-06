@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { appendFile, mkdir, mkdtemp, stat, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -152,6 +152,37 @@ test("server serves the dashboard and usage API", async () => {
       .then((response) => response.json());
     assert.equal(requestPage.total, 1);
     assert.equal(requestPage.requests.length, 1);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test("turn detail remains available after the memory cache evicts earlier sessions", async () => {
+  const { homeDir, importStoreFile, databaseFile, sessionFile } = await makeFixtureHome();
+  const template = await readFile(sessionFile, 'utf8');
+  for (let index = 2; index <= 10; index++) {
+    await writeFile(path.join(path.dirname(sessionFile), `rollout-${index}.jsonl`),
+      template.replaceAll('server-1', `server-${index}`).replaceAll('server-turn-1', `server-turn-${index}`));
+  }
+  const server = createUsageServer({ homeDir, importStoreFile, databaseFile });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const baseUrl = `http://127.0.0.1:${server.address().port}`;
+  const getJson = async (suffix) => {
+    const response = await fetch(`${baseUrl}${suffix}`);
+    assert.equal(response.status, 200);
+    return response.json();
+  };
+  try {
+    const first = await getJson('/api/sessions/server-1/turns');
+    const requests = await getJson('/api/sessions/server-1/turns/server-turn-1/requests');
+    for (let index = 2; index <= 10; index++) {
+      const result = await getJson(`/api/sessions/server-${index}/turns`);
+      assert.equal(result.turns[0].turnId, `server-turn-${index}`);
+      assert.equal(result.turns[0].requestCount, 1);
+    }
+    assert.deepEqual(await getJson('/api/sessions/server-1/turns'), first);
+    assert.deepEqual(await getJson('/api/sessions/server-1/turns/server-turn-1/requests'), requests);
+    assert.equal(requests.total, 1);
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }

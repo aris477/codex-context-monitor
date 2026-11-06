@@ -15,6 +15,7 @@ import {
   summarizeUsage,
 } from "./usage-core.js";
 import { UsageStore } from "./usage-store.js";
+import { BoundedCache } from './bounded-cache.js';
 import { readCurrentView } from "./current-view.js";
 import { createWindowsVisualProvider } from "./visual-current-view.js";
 import { MODEL_PRICING, PRICING_VERSION, sumCosts } from "./pricing.js";
@@ -216,7 +217,7 @@ export function createUsageServer(options = {}) {
   }) : null;
   let storeStatus = null;
   let syncPromise = null;
-  const turnCache = new Map();
+  const turnCache = new BoundedCache();
   const turnCachePromises = new Map();
 
   async function sessionTurns(session) {
@@ -233,9 +234,10 @@ export function createUsageServer(options = {}) {
       const cacheDir = options.turnCacheDir || path.join(options.homeDir || os.homedir(), ".codex-usage", "turn-cache");
       const cacheFile = path.join(cacheDir, `${session.id}.json`);
       try {
-        const cached = JSON.parse(await readFile(cacheFile, "utf8"));
+        const cacheText = await readFile(cacheFile, "utf8");
+        const cached = JSON.parse(cacheText);
         if (cached.fingerprint === fingerprint && Array.isArray(cached.turns)) {
-          turnCache.set(session.id, cached);
+          turnCache.set(session.id, cached, Buffer.byteLength(cacheText));
           return cached.turns;
         }
       } catch {
@@ -248,10 +250,11 @@ export function createUsageServer(options = {}) {
         homePath: session.homePath,
       });
       const entry = { fingerprint, turns };
-      turnCache.set(session.id, entry);
+      const cacheText = JSON.stringify(entry);
+      turnCache.set(session.id, entry, Buffer.byteLength(cacheText));
       await mkdir(cacheDir, { recursive: true });
       const temporaryFile = `${cacheFile}.${process.pid}.tmp`;
-      await writeFile(temporaryFile, JSON.stringify(entry));
+      await writeFile(temporaryFile, cacheText);
       await rename(temporaryFile, cacheFile);
       return turns;
     })().finally(() => turnCachePromises.delete(session.id));

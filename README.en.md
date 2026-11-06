@@ -2,6 +2,8 @@
 
 > **AI-generated modifications:** This is an experimental context-monitoring enhancement of [PukerWonderLand/codex-usage](https://github.com/PukerWonderLand/codex-usage). Most added or modified code, tests, and some documentation in this enhancement were generated and iterated by generative AI (OpenAI Codex) in response to user instructions. This statement does not describe the authorship of upstream code. This is an independent community project, unaffiliated with and not endorsed by OpenAI. See [AI disclosure and validation](AI_DISCLOSURE.md) and the [enhancement guide (Chinese)](使用说明.md). The upstream documentation below is retained; the enhancement guide takes precedence for this version's behavior.
 
+**Windows startup:** Run Setup-CodexCompanion.ps1 for a small native listener with recovery and manual pause. See [setup and validation limits](docs/codex-companion.md).
+
 **Linux deployment:** [Hooks, per-answer usage reporting, systemd dashboard and SMB archive integration (Chinese)](docs/linux-archive-deployment.md).
 
 [简体中文](README.md) | [English](README.en.md)
