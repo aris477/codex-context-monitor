@@ -60,6 +60,19 @@ test('complete accessible toolbar titles identify scrolled-out rows without acce
   assert.equal(matchVisualSample({ ...s, title: '上下文插件…' }, candidates, now).status, 'ambiguous');
 });
 
+test('relative geometry requires the visible title row and ignores a different hover candidate', () => {
+  const s = { ...sample(), titleSource: 'windows-chat-toolbar', selectionMethod: 'relative-edge-geometry', titleRowVisible: true };
+  assert.equal(matchVisualSample(s, candidates, now).threadId, 'A');
+  s.selectedRows.push({ text: '鹈鹕测试', contrast: 10 });
+  assert.equal(matchVisualSample(s, candidates, now).threadId, 'A');
+  s.selectedRows = [{ text: '鹈鹕测试', contrast: 10 }];
+  assert.equal(matchVisualSample(s, candidates, now).status, 'ambiguous');
+  s.selectedRows = [];
+  assert.equal(matchVisualSample(s, candidates, now).status, 'ambiguous');
+  s.titleRowVisible = false;
+  assert.equal(matchVisualSample(s, candidates, now).threadId, 'A');
+});
+
 test('long titles keep their full identity beyond a shared prefix and reject clipped OCR', () => {
   const prefix = 'Review a long conversation about API models, configuration, and window automation '.repeat(2);
   const first = `${prefix}(first conversation)`;

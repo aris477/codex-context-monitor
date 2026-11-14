@@ -6,6 +6,9 @@ All notable changes to this project will be documented in this file. This projec
 
 ### Fixed
 
+- Replace RGB fill-distance selection with relative grayscale geometry: paired edges, side boundaries, rounded-corner recovery, local noise, and peer-row comparison. Locate the sidebar from accessible control bounds when available, and verify visible selection candidates against the live title so hovering another row cannot steal identity. Remove frame identity caches.
+- Compile and hash both native sources. Add Windows-native geometry regressions for light/dark fills, gradients, noise, DPI scales, touching hover rows, and background false positives.
+
 - Improve sidebar selection detection on translucent backgrounds using local color contrast, selection bands, and row OCR fallback. Keep the default layout path; no wallpaper or theme dependency is added.
 
 - Prefer the accessible toolbar title before OCR. Never reuse a full-frame cache for an unverified OCR title, and recheck the live accessible title before reusing a verified frame, so a transient title error during navigation cannot persist for 60 seconds.

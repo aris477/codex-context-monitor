@@ -7,6 +7,7 @@ import { promisify } from 'node:util';
 
 const run = promisify(execFile);
 const SOURCE = fileURLToPath(new URL('../native/VisualReader.cs', import.meta.url));
+const GEOMETRY_SOURCE = fileURLToPath(new URL('../native/SelectionGeometry.cs', import.meta.url));
 const SOURCE_NAME = 'windows-sidebar-ocr';
 // OCR inserts spaces between Chinese characters and occasionally sees a leading
 // bracket in the title glyphs. Normalize both UI and stored labels identically;
@@ -28,7 +29,8 @@ export function matchVisualSample(sample, candidates, now = Date.now()) {
   // identity even when the selected sidebar row has scrolled out of view.
   // OCR-only titles still require the independent selected-row cross-check.
   const accessibleHeading = sample.titleSource === 'windows-chat-toolbar';
-  if (!accessibleHeading && selected.length !== 1) return missing('ambiguous', '侧栏选中行与聊天标题无法唯一对应');
+  const visibleGeometryRow = sample.selectionMethod === 'relative-edge-geometry' && sample.titleRowVisible === true;
+  if ((!accessibleHeading || visibleGeometryRow) && selected.length !== 1) return missing('ambiguous', '侧栏选中行与聊天标题无法唯一对应');
   const matches = new Map(candidates.filter((s) => normalizeVisualTitle(s.name || s.title) === heading).map((s) => [s.id, s]));
   if (matches.size !== 1) return missing('ambiguous', matches.size ? '存在同名聊天，无法唯一匹配会话 ID' : '标题尚未匹配到本地会话 ID');
   const session = matches.values().next().value;
@@ -41,7 +43,7 @@ export function matchVisualSample(sample, candidates, now = Date.now()) {
 async function buildReader(cacheDir) {
   const system = process.env.SystemRoot || 'C:\\Windows';
   const framework = path.join(system, 'Microsoft.NET', 'Framework64', 'v4.0.30319');
-  const source = await readFile(SOURCE);
+  const source = Buffer.concat(await Promise.all([SOURCE, GEOMETRY_SOURCE].map((file) => readFile(file))));
   const digest = createHash('sha256').update(source).digest('hex').slice(0, 16);
   const binary = path.join(cacheDir, `visual-reader-${digest}.exe`);
   try { await access(binary); return binary; } catch { /* Build from included source. */ }
@@ -54,7 +56,7 @@ async function buildReader(cacheDir) {
   ];
   await run(path.join(framework, 'csc.exe'), [
     '/nologo', '/codepage:65001', '/target:exe', '/platform:x64', `/out:${binary}`,
-    ...references.map((file) => `/r:${file}`), SOURCE,
+    ...references.map((file) => `/r:${file}`), SOURCE, GEOMETRY_SOURCE,
   ], { windowsHide: true, timeout: 30000, maxBuffer: 32768, env: { ...process.env, TEMP: cacheDir, TMP: cacheDir } });
   return binary;
 }
