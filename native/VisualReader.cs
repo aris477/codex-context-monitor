@@ -34,9 +34,13 @@ public static class VisualReader {
     static OcrEngine engine;
     static bool engineTried;
     static byte[] lastFingerprint;
+    static byte[] lastPillFingerprint;
+    static Rectangle lastPillCrop;
+    static TextLine lastHeadingLine;
     static IntPtr lastWindow;
     static int lastWidth,lastHeight,lastRight,lastLeft;
     static string lastTitle;
+    static bool lastTitleAccessible;
     static List<TextLine> lastRows;
     static DateTime lastFullRead;
     static int ocrPasses,cacheHits;
@@ -58,30 +62,115 @@ public static class VisualReader {
     static double PixelBand(Bitmap b,int x,int y) {
         return (Luma(b.GetPixel(Math.Max(0,x-1),y))+Luma(b.GetPixel(x,y))+Luma(b.GetPixel(Math.Min(b.Width-1,x+1),y)))/3.0;
     }
-    static int Divider(Bitmap b,int from,int to,double u) {
-        double best=2.2; int found=-1;
-        int step=Math.Max(3,(int)(7*u)), gap=Math.Max(2,(int)(4*u));
-        for(int x=from; x<Math.Min(to,b.Width-gap-1);x++) {
-            var values=new List<double>();
-            for(int y=(int)(125*u);y<b.Height-(int)(100*u);y+=step) {
-                double l=PixelBand(b,x-gap,y),r=PixelBand(b,x+gap,y),c=Luma(b.GetPixel(x,y));
-                values.Add(Math.Max(Math.Abs(l-r),Math.Abs(c-(l+r)/2)));
+    static Color AvgColor(Bitmap b,int x,int y) {
+        int r=0,g=0,bl=0,n=0;
+        for(int dy=-1;dy<=1;dy++) {
+            int py=Math.Max(0,Math.Min(b.Height-1,y+dy));
+            for(int dx=-1;dx<=1;dx++) {
+                int px=Math.Max(0,Math.Min(b.Width-1,x+dx));
+                Color c=b.GetPixel(px,py);
+                r+=c.R; g+=c.G; bl+=c.B; n++;
             }
-            if(values.Count<15) continue;
-            double score=Median(values);
-            if(score>best) { best=score; found=x; }
         }
-        return found;
+        return Color.FromArgb(r/n,g/n,bl/n);
+    }
+    static double ColorDiff(Color a,Color b) {
+        double dr=a.R-b.R, dg=a.G-b.G, db=a.B-b.B;
+        return Math.Sqrt((dr*dr+dg*dg+db*db)/3.0);
     }
     static double DividerScore(Bitmap b,int x,double u) {
         int gap=Math.Max(2,(int)(4*u));
         if(x<=gap||x>=b.Width-gap)return 0;
         var values=new List<double>();
+        int pos=0,neg=0,line=0;
         for(int y=(int)(125*u);y<b.Height-(int)(100*u);y+=Math.Max(3,(int)(7*u))) {
             double l=PixelBand(b,x-gap,y),r=PixelBand(b,x+gap,y),c=Luma(b.GetPixel(x,y));
-            values.Add(Math.Max(Math.Abs(l-r),Math.Abs(c-(l+r)/2)));
+            double step=r-l, edge=Math.Abs(c-(l+r)/2);
+            if(step>1.8)pos++; else if(step<-1.8)neg++;
+            if(edge>1.8)line++;
+            values.Add(Math.Max(Math.Abs(step),edge));
         }
-        return values.Count<15?0:Median(values);
+        if(values.Count<15)return 0;
+        double consistency=Math.Max(Math.Max(pos,neg),line)/(double)values.Count;
+        return consistency>=0.65?Median(values):0;
+    }
+    static int Divider(Bitmap b,int from,int to,double u) {
+        double best=2.2; int found=-1;
+        for(int x=from; x<Math.Min(to,b.Width-1);x++) {
+            double score=DividerScore(b,x,u);
+            if(score>best) { best=score; found=x; }
+        }
+        return found;
+    }
+    static double RowScoreAtY(Bitmap b,int left,int right,int y,int outTopY,int outBotY,double u,out Color pillColor) {
+        pillColor=Color.Empty;
+        if(y<2||y>=b.Height-2)return 0;
+        int gutLx=left+(int)(4*u), gutRx=right-(int)(11*u);
+        int inLx=left+(int)(12*u);
+        int[] inRxs=new int[] { right-(int)(24*u), right-(int)(32*u), right-(int)(42*u) };
+        Color gutL=AvgColor(b,gutLx,y), gutR=AvgColor(b,gutRx,y);
+        Color inL=AvgColor(b,inLx,y);
+        double vertL=(outTopY>=2&&outBotY<b.Height-2)
+            ?Math.Min(ColorDiff(inL,AvgColor(b,inLx,outTopY)),ColorDiff(inL,AvgColor(b,inLx,outBotY)))
+            :0;
+        double diffL=Math.Max(ColorDiff(inL,gutL),vertL);
+        double best=0;
+        foreach(int inRx in inRxs) {
+            if(inRx<=inLx+(int)(20*u))continue;
+            Color inR=AvgColor(b,inRx,y);
+            if(ColorDiff(inL,inR)>12)continue;
+            double vertR=(outTopY>=2&&outBotY<b.Height-2)
+                ?Math.Min(ColorDiff(inR,AvgColor(b,inRx,outTopY)),ColorDiff(inR,AvgColor(b,inRx,outBotY)))
+                :0;
+            double diffR=Math.Max(ColorDiff(inR,gutR),vertR);
+            double s=Math.Min(diffL,diffR);
+            if(s>best) { best=s; pillColor=inL; }
+        }
+        return best;
+    }
+    static double PillContrast(Bitmap b,int left,int right,int yCenter,double u) {
+        int d1=Math.Max(2,(int)(5*u)), d2=Math.Max(4,(int)(9*u));
+        int outTopY=yCenter-(int)(19*u), outBotY=yCenter+(int)(19*u);
+        Color cMid,cU1,cU2,cD1,cD2;
+        double mid=RowScoreAtY(b,left,right,yCenter,outTopY,outBotY,u,out cMid);
+        double u1=RowScoreAtY(b,left,right,yCenter-d1,outTopY,outBotY,u,out cU1);
+        double u2=RowScoreAtY(b,left,right,yCenter-d2,outTopY,outBotY,u,out cU2);
+        double d_1=RowScoreAtY(b,left,right,yCenter+d1,outTopY,outBotY,u,out cD1);
+        double d_2=RowScoreAtY(b,left,right,yCenter+d2,outTopY,outBotY,u,out cD2);
+        Color cUp=u1>=u2?cU1:cU2;
+        Color cDown=d_1>=d_2?cD1:cD2;
+        double up=Math.Max(u1,u2), down=Math.Max(d_1,d_2);
+        if(up>=5&&down>=5&&ColorDiff(cUp,cDown)<=10)return Math.Min(up,down);
+        if(mid>=5&&up>=5&&ColorDiff(cMid,cUp)<=10)return Math.Min(mid,up);
+        if(mid>=5&&down>=5&&ColorDiff(cMid,cDown)<=10)return Math.Min(mid,down);
+        return 0;
+    }
+    static List<TextLine> FindPillBands(Bitmap b,int left,int right,int top,int bottom,double u) {
+        var bands=new List<TextLine>();
+        int step=Math.Max(2,(int)(3*u));
+        int bandStart=-1,bandEnd=-1;
+        double bandPeak=0;
+        for(int y=top;y<=bottom;y+=step) {
+            double s=PillContrast(b,left,right,y,u);
+            if(s>=5.0) {
+                if(bandStart<0)bandStart=y;
+                bandEnd=y;
+                if(s>bandPeak)bandPeak=s;
+            } else if(bandStart>=0) {
+                if(bandEnd-bandStart>=(int)(6*u)&&bandEnd-bandStart<=(int)(42*u)) {
+                    int cy=(bandStart+bandEnd)/2;
+                    int h=Math.Max((int)(20*u),bandEnd-bandStart+(int)(8*u));
+                    bands.Add(new TextLine { text="", x=left+(int)(12*u), y=cy-h/2, width=right-left-(int)(55*u), height=h, contrast=bandPeak });
+                }
+                bandStart=-1; bandPeak=0;
+            }
+        }
+        if(bandStart>=0&&bandEnd-bandStart>=(int)(6*u)&&bandEnd-bandStart<=(int)(42*u)) {
+            int cy=(bandStart+bandEnd)/2;
+            int h=Math.Max((int)(20*u),bandEnd-bandStart+(int)(8*u));
+            bands.Add(new TextLine { text="", x=left+(int)(12*u), y=cy-h/2, width=right-left-(int)(55*u), height=h, contrast=bandPeak });
+        }
+        return bands;
     }
     static byte[] Fingerprint(Bitmap bitmap,Rectangle crop) {
         var data=bitmap.LockBits(crop,ImageLockMode.ReadOnly,PixelFormat.Format32bppArgb);
@@ -99,74 +188,120 @@ public static class VisualReader {
         finally { bitmap.UnlockBits(data); }
     }
     static object Sample(IntPtr window,string heading,List<TextLine> selected,int right,double u,bool cached) {
-        return new { status="sample",windowId=window.ToInt64().ToString(),observedAt=DateTime.UtcNow.ToString("o"),title=heading,selectedRows=selected,sidebarRight=right,dpi=u,cached=cached,ocrPasses=ocrPasses,cacheHits=cacheHits };
+        return new { status="sample",windowId=window.ToInt64().ToString(),observedAt=DateTime.UtcNow.ToString("o"),title=heading,titleSource=lastTitleAccessible?"windows-chat-toolbar":"ocr",selectedRows=selected,sidebarRight=right,dpi=u,cached=cached,ocrPasses=ocrPasses,cacheHits=cacheHits };
+    }
+    static void EnhanceForOcr(Bitmap part) {
+        int tileW=Math.Max(32,part.Width/6);
+        for(int tx=0;tx<part.Width;tx+=tileW) {
+            int tw=Math.Min(tileW,part.Width-tx);
+            int[] hist=new int[256];
+            int count=0;
+            for(int y=0;y<part.Height;y+=2) {
+                for(int x=tx;x<tx+tw;x+=2) {
+                    Color c=part.GetPixel(x,y);
+                    hist[(c.R+c.G+c.B)/3]++; count++;
+                }
+            }
+            int med=128,acc=0;
+            for(int i=0;i<256;i++) { acc+=hist[i]; if(acc>=count/2) { med=i; break; } }
+            if(med<170) {
+                double floor=med+14;
+                double span=Math.Max(35.0,232.0-floor);
+                for(int y=0;y<part.Height;y++) {
+                    for(int x=tx;x<tx+tw;x++) {
+                        Color c=part.GetPixel(x,y);
+                        double l=(c.R+c.G+c.B)/3.0;
+                        int v=l<=floor?255:(int)Math.Max(0,Math.Min(255,255.0-(l-floor)*255.0/span));
+                        part.SetPixel(x,y,Color.FromArgb(255,v,v,v));
+                    }
+                }
+            }
+        }
+    }
+    static List<object> ReadLinesFromPart(Bitmap part,double scale,int ox,int oy) {
+        var result=new List<object>();
+        var data=part.LockBits(new Rectangle(0,0,part.Width,part.Height),ImageLockMode.ReadOnly,PixelFormat.Format32bppArgb);
+        uint length=checked((uint)(part.Width*part.Height*4));
+        var buffer=new Windows.Storage.Streams.Buffer(length); buffer.Length=length;
+        IntPtr ptr; ((IBufferByteAccess)(object)buffer).Buffer(out ptr);
+        try { for(int y=0;y<part.Height;y++) CopyMemory(IntPtr.Add(ptr,y*part.Width*4),IntPtr.Add(data.Scan0,y*data.Stride),(UIntPtr)(uint)(part.Width*4)); }
+        finally { part.UnlockBits(data); }
+        using(var sb=SoftwareBitmap.CreateCopyFromBuffer(buffer,BitmapPixelFormat.Bgra8,part.Width,part.Height,BitmapAlphaMode.Ignore)) {
+            var operation=engine.RecognizeAsync(sb);
+            try {
+              while(operation.Status==Windows.Foundation.AsyncStatus.Started)Thread.Sleep(5);
+              var recognized=operation.GetResults();
+              foreach(var line in recognized.Lines) {
+                if(line.Words.Count==0)continue;
+                double left=line.Words.Min(w=>w.BoundingRect.X), top=line.Words.Min(w=>w.BoundingRect.Y);
+                double right=line.Words.Max(w=>w.BoundingRect.X+w.BoundingRect.Width), bottom=line.Words.Max(w=>w.BoundingRect.Y+w.BoundingRect.Height);
+                result.Add(new TextLine { text=line.Text, x=left/scale+ox,y=top/scale+oy,width=(right-left)/scale,height=(bottom-top)/scale });
+              }
+            } finally { operation.Close(); }
+        }
+        return result;
     }
     static List<object> ReadLines(Bitmap b,Rectangle crop,int ox,int oy,double preferredScale=2.0) {
-        var result=new List<object>();
         double scale=Math.Min(preferredScale,OcrEngine.MaxImageDimension/(double)Math.Max(crop.Width,crop.Height));
         using(var part=new Bitmap((int)(crop.Width*scale),(int)(crop.Height*scale),PixelFormat.Format32bppArgb)) {
             using(var g=Graphics.FromImage(part)) {
                 g.InterpolationMode=System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
                 g.DrawImage(b,new Rectangle(0,0,part.Width,part.Height),crop,GraphicsUnit.Pixel);
             }
-            var data=part.LockBits(new Rectangle(0,0,part.Width,part.Height),ImageLockMode.ReadOnly,PixelFormat.Format32bppArgb);
-            uint length=checked((uint)(part.Width*part.Height*4));
-            var buffer=new Windows.Storage.Streams.Buffer(length); buffer.Length=length;
-            IntPtr ptr; ((IBufferByteAccess)(object)buffer).Buffer(out ptr);
-            try { for(int y=0;y<part.Height;y++) CopyMemory(IntPtr.Add(ptr,y*part.Width*4),IntPtr.Add(data.Scan0,y*data.Stride),(UIntPtr)(uint)(part.Width*4)); }
-            finally { part.UnlockBits(data); }
-            using(var sb=SoftwareBitmap.CreateCopyFromBuffer(buffer,BitmapPixelFormat.Bgra8,part.Width,part.Height,BitmapAlphaMode.Ignore)) {
-                var operation=engine.RecognizeAsync(sb);
-                try {
-                  while(operation.Status==Windows.Foundation.AsyncStatus.Started)Thread.Sleep(5);
-                  var recognized=operation.GetResults();
-                  foreach(var line in recognized.Lines) {
-                    if(line.Words.Count==0)continue;
-                    double left=line.Words.Min(w=>w.BoundingRect.X), top=line.Words.Min(w=>w.BoundingRect.Y);
-                    double right=line.Words.Max(w=>w.BoundingRect.X+w.BoundingRect.Width), bottom=line.Words.Max(w=>w.BoundingRect.Y+w.BoundingRect.Height);
-                    result.Add(new TextLine { text=line.Text, x=left/scale+ox,y=top/scale+oy,width=(right-left)/scale,height=(bottom-top)/scale });
-                  }
-                } finally { operation.Close(); }
+            var result=ReadLinesFromPart(part,scale,ox,oy);
+            if(result.Count==0) {
+                EnhanceForOcr(part);
+                result=ReadLinesFromPart(part,scale,ox,oy);
             }
+            return result;
         }
-        return result;
     }
     class TextLine { public string text; public double x,y,width,height; public double contrast; internal bool accessible; }
+    static bool InsideHeaderToolBar(AutomationElement text,System.Windows.Rect bounds) {
+        var ancestor=TreeWalker.ControlViewWalker.GetParent(text);
+        for(int depth=0;ancestor!=null && depth<8;depth++,ancestor=TreeWalker.ControlViewWalker.GetParent(ancestor)) {
+            var parent=ancestor.Current;var area=parent.BoundingRectangle;
+            if(parent.ControlType==ControlType.ToolBar && !parent.IsOffscreen
+                && bounds.Left>=area.Left-4 && bounds.Left<=area.Right
+                && bounds.Top>=area.Top-4 && bounds.Bottom<=area.Bottom+4)return true;
+        }
+        return false;
+    }
+    static bool IsHeaderTitle(AutomationElement element,IntPtr window,RECT windowRect,Rectangle crop) {
+        var current=element.Current;var bounds=current.BoundingRectangle;
+        if(current.IsOffscreen || String.IsNullOrWhiteSpace(current.Name)
+            || bounds.Left<windowRect.Left+crop.Left-8 || bounds.Left>windowRect.Left+crop.Right
+            || bounds.Top<windowRect.Top+crop.Top || bounds.Bottom>windowRect.Top+crop.Bottom
+            || !InsideHeaderToolBar(element,bounds))return false;
+        if(current.ControlType==ControlType.Text)return true;
+        // Newer Codex exposes the title as the leading toolbar dropdown button.
+        // Limit buttons to the title's left edge so toolbar actions cannot become identity.
+        double u=Math.Max(1,GetDpiForWindow(window)/96.0);
+        return current.ControlType==ControlType.Button && bounds.Left<=windowRect.Left+crop.Left+40*u;
+    }
     static string ReadHeadingLabel(IntPtr window,RECT windowRect,Rectangle crop,TextLine line) {
         try {
-            double x=windowRect.Left+(line==null?crop.Left+20:line.x+line.width/2);
+            double x=windowRect.Left+(line==null?crop.Left+24:line.x+Math.Min(line.width/2,120));
             double y=windowRect.Top+(line==null?crop.Top+crop.Height/2:line.y+line.height/2);
-            var element=line==null?null:AutomationElement.FromPoint(new System.Windows.Point(x,y));
+            var element=AutomationElement.FromPoint(new System.Windows.Point(x,y));
             var labels=new HashSet<string>();
             for(int depth=0;element!=null && depth<8;depth++,element=TreeWalker.ControlViewWalker.GetParent(element)) {
                 var current=element.Current;var bounds=current.BoundingRectangle;
-                // Only accept the visible title text at the OCR-located heading.
-                // Do not read the embedded monitor's heading.
-                if(current.ControlType==ControlType.Text && !current.IsOffscreen && bounds.Contains(x,y)
-                    && bounds.Left>=windowRect.Left+crop.Left && bounds.Right<=windowRect.Left+crop.Right
-                    && bounds.Top>=windowRect.Top+crop.Top && bounds.Bottom<=windowRect.Top+crop.Bottom
-                    && !String.IsNullOrWhiteSpace(current.Name))labels.Add(current.Name);
+                // Only accept visible title text or its dropdown inside the header ToolBar.
+                // Do not read scrolled chat messages or the embedded monitor's heading.
+                if(bounds.Contains(x,y) && IsHeaderTitle(element,window,windowRect,crop))labels.Add(current.Name);
             }
             if(labels.Count==1)return labels.First();
             if(labels.Count>1)return null;
-            // Chromium point hit testing and document names can be stale after a
-            // failed provider resume. Read the actual header Text inside its own
-            // toolbar instead. Do not trust full-window Document.Name as identity.
+            // Chromium point hit testing passes through pointer-events-none headers
+            // into scrolled messages beneath. Read the title text/dropdown inside
+            // its own toolbar instead. Do not trust full-window Document.Name as identity.
             var root=AutomationElement.FromHandle(window);
-            var texts=root.FindAll(TreeScope.Descendants,new PropertyCondition(AutomationElement.ControlTypeProperty,ControlType.Text));
+            var texts=root.FindAll(TreeScope.Descendants,new OrCondition(
+                new PropertyCondition(AutomationElement.ControlTypeProperty,ControlType.Text),
+                new PropertyCondition(AutomationElement.ControlTypeProperty,ControlType.Button)));
             foreach(AutomationElement text in texts) {
-                var current=text.Current;var bounds=current.BoundingRectangle;
-                if(current.IsOffscreen || String.IsNullOrWhiteSpace(current.Name)
-                    || bounds.Left<windowRect.Left+crop.Left || bounds.Right>windowRect.Left+crop.Right
-                    || bounds.Top<windowRect.Top+crop.Top || bounds.Bottom>windowRect.Top+crop.Bottom)continue;
-                var ancestor=TreeWalker.ControlViewWalker.GetParent(text);
-                for(int depth=0;ancestor!=null && depth<6;depth++,ancestor=TreeWalker.ControlViewWalker.GetParent(ancestor)) {
-                    var parent=ancestor.Current;var area=parent.BoundingRectangle;
-                    if(parent.ControlType==ControlType.ToolBar && !parent.IsOffscreen
-                        && area.Contains(bounds.TopLeft) && area.Contains(bounds.BottomRight)) {
-                        labels.Add(current.Name);break;
-                    }
-                }
+                if(IsHeaderTitle(text,window,windowRect,crop))labels.Add(text.Current.Name);
             }
             if(labels.Count==1)return labels.First();
         } catch { /* Keep OCR as the fallback when accessibility is absent. */ }
@@ -229,35 +364,55 @@ public static class VisualReader {
             bool sameLayout=lastWindow==window&&lastWidth==width&&lastHeight==height;
             int right=sameLayout&&DividerScore(bitmap,lastRight,u)>2.2?lastRight:Divider(bitmap,(int)(180*u),Math.Min((int)(600*u),(int)(width*.45)),u);
             if(right<0)return Missing("未识别到展开的会话侧栏");
-            int left=sameLayout&&right==lastRight?lastLeft:Divider(bitmap,(int)(35*u),Math.Min((int)(110*u),right-100),u);
-            if(left<0)left=(int)(52*u);
-            if(right-left<100*u)return Missing("会话侧栏过窄");
             // The final sidebar row extends into the old 32-DIP bottom margin.
             // Keep its full glyphs and selection band, even at the scroll limit.
             int top=(int)(100*u), bottom=height-(int)(8*u);
+            int left=sameLayout&&right==lastRight?lastLeft:(right>=(int)(265*u)?Divider(bitmap,(int)(48*u),(int)(58*u),u):-1);
+            if(left<0||(left>0&&FindPillBands(bitmap,0,right,top,bottom,u).Count==1))left=0;
+            if(right-left<100*u)return Missing("会话侧栏过窄");
             var sidebar=new Rectangle(left+(int)(12*u),top,right-left-(int)(55*u),bottom-top);
-            int hx=right+(int)(20*u),hy=(int)(40*u),hw=Math.Min((int)(550*u),captureWidth-hx-(int)(40*u)),hh=(int)(52*u);
+            int hx=right+(int)(6*u),hy=(int)(34*u),hw=Math.Min((int)(620*u),captureWidth-hx-(int)(20*u)),hh=(int)(62*u);
             if(hw<100)return Missing("聊天标题区域不可见");
             var titleCrop=new Rectangle(hx,hy,hw,hh);
             var fingerprint=Fingerprint(bitmap,sidebar).Concat(Fingerprint(bitmap,titleCrop)).ToArray();
             if(GetForegroundWindow()!=window)return Missing("窗口切换中，等待下一次识别");
-            if(sameLayout&&lastFingerprint!=null&&lastFingerprint.SequenceEqual(fingerprint)
+            // An initial OCR fallback during navigation can include the dropdown
+            // arrow. Never freeze that unverified title for the 60-second cache
+            // period; re-read the live accessible toolbar name on the next sample.
+            if(sameLayout&&lastTitleAccessible&&lastFingerprint!=null&&lastFingerprint.SequenceEqual(fingerprint)
                 &&DateTime.UtcNow-lastFullRead<TimeSpan.FromSeconds(60)&&!String.IsNullOrWhiteSpace(lastTitle)) {
-                cacheHits++;
-                return Sample(window,lastTitle,lastRows,right,u,true);
+                string currentHeading=ReadHeadingLabel(window,r,titleCrop,lastHeadingLine);
+                if(currentHeading==lastTitle) {
+                    cacheHits++;
+                    return Sample(window,lastTitle,lastRows,right,u,true);
+                }
+            }
+            var bands=FindPillBands(bitmap,left,right,top,bottom,u);
+            if(sameLayout&&lastRows!=null&&lastRows.Count==1&&bands.Count==1&&lastPillFingerprint!=null
+                &&lastPillCrop.Width>0&&lastPillCrop.Height>0
+                &&Math.Abs((bands[0].y+bands[0].height/2)-(lastPillCrop.Top+lastPillCrop.Height/2))<=4*u
+                &&DateTime.UtcNow-lastFullRead<TimeSpan.FromSeconds(60)&&!String.IsNullOrWhiteSpace(lastTitle)) {
+                var pillHash=Fingerprint(bitmap,lastPillCrop);
+                if(pillHash.SequenceEqual(lastPillFingerprint)) {
+                    string quickHeading=ReadHeadingLabel(window,r,titleCrop,lastHeadingLine);
+                    if(quickHeading==lastTitle) {
+                        lastTitleAccessible=true;
+                        cacheHits++;
+                        return Sample(window,lastTitle,lastRows,right,u,true);
+                    }
+                }
             }
             ocrPasses++;
             var lines=ReadLines(bitmap,sidebar,sidebar.X,sidebar.Y).Cast<TextLine>().ToList();
-            int sampleLeft=left+(int)(10*u),sampleRight=right-(int)(20*u);
-            var baseLeft=new List<double>();var baseRight=new List<double>();
-            for(int y=top;y<bottom;y+=Math.Max(3,(int)(5*u))) { baseLeft.Add(PixelBand(bitmap,sampleLeft,y));baseRight.Add(PixelBand(bitmap,sampleRight,y)); }
-            double bgLeft=Median(baseLeft), bgRight=Median(baseRight);
             var selected=new List<TextLine>();
             foreach(var line in lines) {
                 int y=Math.Min(height-1,(int)(line.y+line.height/2));
-                double dl=PixelBand(bitmap,sampleLeft,y)-bgLeft, dr=PixelBand(bitmap,sampleRight,y)-bgRight;
-                line.contrast=Math.Min(Math.Abs(dl),Math.Abs(dr));
-                if(line.contrast>=5 && dl*dr>0)selected.Add(line);
+                line.contrast=PillContrast(bitmap,left,right,y,u);
+                if(line.contrast>=5)selected.Add(line);
+            }
+            foreach(var band in bands) {
+                double bc=band.y+band.height/2;
+                if(!selected.Any(s=>Math.Abs((s.y+s.height/2)-bc)<=14*u))selected.Add(band);
             }
             ReadSelectedLabels(window,r,right,selected);
             foreach(var line in selected) {
@@ -270,12 +425,27 @@ public static class VisualReader {
                     if(rowLines.Count==1)line.text=rowLines[0].text;
                 }
             }
-            var headingLines=ReadLines(bitmap,titleCrop,hx,hy).Cast<TextLine>().ToList();
-            var headingLine=headingLines.OrderBy(l=>l.x).FirstOrDefault();
-            string heading=ReadHeadingLabel(window,r,titleCrop,headingLine)??(headingLine==null?"":headingLine.text);
+            // Prefer the complete live title. OCR is only needed when the toolbar
+            // is temporarily unavailable; failed accessibility is retried next sample.
+            string accessibleHeading=ReadHeadingLabel(window,r,titleCrop,null);
+            TextLine headingLine=null;
+            if(accessibleHeading==null) {
+                var headingLines=ReadLines(bitmap,titleCrop,hx,hy,2.5).Cast<TextLine>().ToList();
+                headingLine=headingLines.OrderBy(l=>l.x).FirstOrDefault();
+                accessibleHeading=ReadHeadingLabel(window,r,titleCrop,headingLine);
+            }
+            string heading=accessibleHeading??(headingLine==null?"":headingLine.text);
             if(GetForegroundWindow()!=window)return Missing("窗口切换中，等待下一次识别");
             lastWindow=window;lastWidth=width;lastHeight=height;lastRight=right;lastLeft=left;
-            lastFingerprint=fingerprint;lastTitle=heading;lastRows=selected;lastFullRead=DateTime.UtcNow;
+            lastFingerprint=fingerprint;lastTitle=heading;lastTitleAccessible=accessibleHeading!=null;lastRows=selected;lastHeadingLine=headingLine;lastFullRead=DateTime.UtcNow;
+            if(selected.Count==1) {
+                int pTop=Math.Max(top,(int)selected[0].y), pBot=Math.Min(bottom,(int)(selected[0].y+selected[0].height));
+                int pWidth=Math.Max(40,right-left-(int)(60*u));
+                if(pBot-pTop>=8) {
+                    lastPillCrop=new Rectangle(left+(int)(14*u),pTop,pWidth,pBot-pTop);
+                    lastPillFingerprint=Fingerprint(bitmap,lastPillCrop);
+                } else { lastPillFingerprint=null; }
+            } else { lastPillFingerprint=null; }
             return Sample(window,heading,selected,right,u,false);
         }
     }

@@ -49,6 +49,17 @@ test('hover, hidden sidebar and title mismatch never substitute another active t
   assert.equal(matchVisualSample(sample(''), candidates, now).status, 'not-a-thread');
 });
 
+test('complete accessible toolbar titles identify scrolled-out rows without accepting OCR guesses', () => {
+  const s = { ...sample(), titleSource: 'windows-chat-toolbar', selectedRows: [] };
+  assert.equal(matchVisualSample(s, candidates, now).threadId, 'A');
+  s.selectedRows = [{ text: '鹈鹕测试', contrast: 14 }]; // Hover on another row.
+  assert.equal(matchVisualSample(s, candidates, now).threadId, 'A');
+  assert.equal(matchVisualSample(s, [...candidates, { id: 'C', name: '上下文插件1' }], now).status, 'ambiguous');
+  assert.equal(matchVisualSample({ ...s, titleSource: 'ocr' }, candidates, now).status, 'ambiguous');
+  assert.equal(matchVisualSample({ ...s, observedAt: new Date(now - 4001).toISOString() }, candidates, now).status, 'unavailable');
+  assert.equal(matchVisualSample({ ...s, title: '上下文插件…' }, candidates, now).status, 'ambiguous');
+});
+
 test('long titles keep their full identity beyond a shared prefix and reject clipped OCR', () => {
   const prefix = 'Review a long conversation about API models, configuration, and window automation '.repeat(2);
   const first = `${prefix}(first conversation)`;

@@ -1,5 +1,7 @@
 # Codex Usage
 
+**No video wallpaper required:** The monitor works with the default Codex interface and has no wallpaper or theme-plugin dependency. Open `http://127.0.0.1:3765/` after starting it. Shortcut cards supplied by a custom video theme are optional and are not included in this repository.
+
 > **AI-generated modifications:** This is an experimental context-monitoring enhancement of [PukerWonderLand/codex-usage](https://github.com/PukerWonderLand/codex-usage). Most added or modified code, tests, and some documentation in this enhancement were generated and iterated by generative AI (OpenAI Codex) in response to user instructions. This statement does not describe the authorship of upstream code. This is an independent community project, unaffiliated with and not endorsed by OpenAI. See [AI disclosure and validation](AI_DISCLOSURE.md) and the [enhancement guide (Chinese)](使用说明.md). The upstream documentation below is retained; the enhancement guide takes precedence for this version's behavior.
 
 **Windows startup:** Run Setup-CodexCompanion.ps1 for a small native listener with recovery and manual pause. See [setup and validation limits](docs/codex-companion.md).

@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file. This projec
 
 ## [Unreleased]
 
+### Fixed
+
+- Improve sidebar selection detection on translucent backgrounds using local color contrast, selection bands, and row OCR fallback. Keep the default layout path; no wallpaper or theme dependency is added.
+
+- Prefer the accessible toolbar title before OCR. Never reuse a full-frame cache for an unverified OCR title, and recheck the live accessible title before reusing a verified frame, so a transient title error during navigation cannot persist for 60 seconds.
+
+- Keep identifying a unique complete accessible chat-toolbar title when its selected sidebar row scrolls out of view. OCR titles retain the selected-row cross-check; duplicate titles and stale samples remain rejected.
+
+- Read the leading chat-title dropdown button in newer Codex toolbars through Windows accessibility. Keep the selected sidebar row and complete title cross-check, without treating the dropdown arrow as OCR title text.
+
 ## [0.2.0] - 2026-08-21
 
 ### Added

@@ -18,6 +18,10 @@
 
 识别组件在连续 10 秒无身份请求后退出。其他聊天中的内嵌网页若仍在轮询，会保持组件运行；仅切换聊天不保证休眠。性能结果是单机短时采样，不承诺固定占用或降幅。
 
+## 2026-11-14 更新验证
+
+新版顶栏标题按钮、侧栏选中行滚出可见范围及切换时错误 OCR 缓存已修复。本机最新 C# 编译成功；发布前完整检查 106 通过、0 失败、1 跳过，身份识别回归测试 10/10 通过，并对两条此前失败的聊天反复切换核对会话 ID。监控不依赖视频背景；本次新增桌面实测使用现有视频主题，未对所有主题和缩放进行兼容性验证。主题快捷入口及视频文件不随监控源码发布。
+
 ## English
 
 This enhancement is derived from PukerWonderLand/codex-usage at commit `19a2e96e945f8c1bcc7cebd24a22a1133ff22db0`. The upstream MIT license and copyright notice are retained.

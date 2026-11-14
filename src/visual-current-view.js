@@ -24,7 +24,11 @@ export function matchVisualSample(sample, candidates, now = Date.now()) {
   const heading = normalizeVisualTitle(sample.title);
   if (!heading) return missing('not-a-thread', '未读取到聊天标题，等待下一次识别');
   const selected = (sample.selectedRows || []).filter((row) => row.contrast >= 5 && normalizeVisualTitle(row.text) === heading);
-  if (selected.length !== 1) return missing('ambiguous', '侧栏选中行与聊天标题无法唯一对应');
+  // A complete accessible name from the visible chat toolbar is explicit UI
+  // identity even when the selected sidebar row has scrolled out of view.
+  // OCR-only titles still require the independent selected-row cross-check.
+  const accessibleHeading = sample.titleSource === 'windows-chat-toolbar';
+  if (!accessibleHeading && selected.length !== 1) return missing('ambiguous', '侧栏选中行与聊天标题无法唯一对应');
   const matches = new Map(candidates.filter((s) => normalizeVisualTitle(s.name || s.title) === heading).map((s) => [s.id, s]));
   if (matches.size !== 1) return missing('ambiguous', matches.size ? '存在同名聊天，无法唯一匹配会话 ID' : '标题尚未匹配到本地会话 ID');
   const session = matches.values().next().value;
