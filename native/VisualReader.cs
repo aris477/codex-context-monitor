@@ -19,15 +19,9 @@ using Windows.Media.Ocr;
 // The helper only operates while the official Codex window is foreground.
 public static class VisualReader {
     [StructLayout(LayoutKind.Sequential)] struct RECT { public int Left, Top, Right, Bottom; }
-    [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
-    [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
     [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr h, out RECT r);
-    [DllImport("user32.dll")] static extern bool IsIconic(IntPtr h);
     [DllImport("user32.dll")] static extern uint GetDpiForWindow(IntPtr h);
     [DllImport("user32.dll")] static extern bool SetProcessDpiAwarenessContext(IntPtr value);
-    [DllImport("kernel32.dll",SetLastError=true)] static extern IntPtr OpenProcess(uint access,bool inherit,uint pid);
-    [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)] static extern bool QueryFullProcessImageName(IntPtr process,int flags,StringBuilder path,ref int size);
-    [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr handle);
     [DllImport("kernel32.dll",EntryPoint="RtlMoveMemory")] static extern void CopyMemory(IntPtr target,IntPtr source,UIntPtr bytes);
     [ComImport, Guid("905a0fef-bc53-11df-8c49-001e4fc686da"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
     interface IBufferByteAccess { void Buffer(out IntPtr value); }
@@ -36,18 +30,9 @@ public static class VisualReader {
     static int ocrPasses;
     static bool diagnostics;
     static JavaScriptSerializer json = new JavaScriptSerializer();
-    static object Missing(string reason) { return new { status="unavailable", reason=reason }; }
-    static bool IsCodex(uint pid) {
-        IntPtr process=OpenProcess(0x1000,false,pid);
-        if(process==IntPtr.Zero)return false;
-        try {
-              var path=new StringBuilder(32768);int length=path.Capacity;
-              if(!QueryFullProcessImageName(process,0,path,ref length))return false;
-              string p=path.ToString();
-              return p.IndexOf(@"\WindowsApps\OpenAI.Codex_",StringComparison.OrdinalIgnoreCase)>=0
-                && (Path.GetFileName(p).Equals("ChatGPT.exe",StringComparison.OrdinalIgnoreCase) || Path.GetFileName(p).Equals("Codex.exe",StringComparison.OrdinalIgnoreCase));
-        } finally { CloseHandle(process); }
-    }
+    static readonly CodexForeground foreground=new CodexForeground(new WindowsForegroundDesktop());
+    static string foregroundState;
+    static object Missing(string reason) { return new { status="unavailable", reason=reason,foregroundState=foregroundState }; }
     static double Luma(Color c) { return (c.R+c.G+c.B)/3.0; }
     static double Median(List<double> values) { values.Sort(); return values[values.Count/2]; }
     static double PixelBand(Bitmap b,int x,int y) {
@@ -267,9 +252,9 @@ public static class VisualReader {
         }catch{return null;}
     }
     static object Capture() {
-        IntPtr window=GetForegroundWindow(); uint pid; GetWindowThreadProcessId(window,out pid);
-        if(window==IntPtr.Zero)return Missing("无法访问 Windows 前台桌面，请通过桌面快捷方式启动面板");
-        if(!IsCodex(pid) || IsIconic(window))return Missing("Codex 未在前台，视觉识别暂停");
+        var active=foreground.Read();foregroundState=active.Code;
+        if(!active.CanCapture)return Missing(active.Reason);
+        IntPtr window=active.Window;
         RECT r;if(!GetWindowRect(window,out r))return Missing("无法读取 Codex 窗口");
         int width=r.Right-r.Left,height=r.Bottom-r.Top;
         if(width<500||height<400||width>12000||height>8000)return Missing("Codex 窗口尺寸不适合视觉识别");
@@ -278,7 +263,7 @@ public static class VisualReader {
         int captureWidth=Math.Min(width,(int)(1200*u));
         using(var bitmap=new Bitmap(captureWidth,height,PixelFormat.Format32bppArgb)) {
             using(var g=Graphics.FromImage(bitmap))g.CopyFromScreen(r.Left,r.Top,0,0,new Size(captureWidth,height),CopyPixelOperation.SourceCopy);
-            if(GetForegroundWindow()!=window)return Missing("窗口切换中，等待下一次识别");
+            if(!foreground.StillCurrent(active))return Missing("前台窗口已切换，等待下一次识别");
             int top=(int)(100*u),bottom=height-(int)(8*u);
             if(layout==null) {
                 int divider=Divider(bitmap,(int)(180*u),Math.Min((int)(600*u),(int)(width*.45)),u);
@@ -322,11 +307,17 @@ public static class VisualReader {
                 accessibleHeading=ReadHeadingLabel(window,r,titleCrop,headingLine);
             }
             string heading=accessibleHeading??(headingLine==null?"":headingLine.text);
-            if(GetForegroundWindow()!=window)return Missing("窗口切换中，等待下一次识别");
-            if(accessibleHeading!=null && ReadHeadingLabel(window,r,titleCrop,null)!=accessibleHeading)
-                return Missing("聊天切换中，等待标题与选中行稳定");
+            if(!foreground.StillCurrent(active))return Missing("前台窗口已切换，等待下一次识别");
+            if(accessibleHeading!=null) {
+                string recheckedHeading=ReadHeadingLabel(window,r,titleCrop,null);
+                if(recheckedHeading!=accessibleHeading) {
+                    if(diagnostics)return new {status="unavailable",reason="聊天切换中，等待标题与选中行稳定",foregroundState=foregroundState,
+                        firstTitle=accessibleHeading,recheckedTitle=recheckedHeading};
+                    return Missing("聊天切换中，等待标题与选中行稳定");
+                }
+            }
             return new {status="sample",windowId=window.ToInt64().ToString(),observedAt=DateTime.UtcNow.ToString("o"),
-                title=heading,titleSource=accessibleHeading!=null?"windows-chat-toolbar":"ocr",selectedRows=selected,
+                title=heading,titleSource=accessibleHeading!=null?"windows-chat-toolbar":"ocr",selectedRows=selected,foregroundState=foregroundState,
                 titleRowVisible=layout.Rows.Any(row=>row.accessible&&row.text==heading),rowDiagnostics=diagnostics?layout.Rows:null,
                 selectionMethod="relative-edge-geometry",layoutSource=layout.Source,sidebarRight=right,dpi=u,cached=false,ocrPasses=ocrPasses};
         }
@@ -341,6 +332,12 @@ public static class VisualReader {
     [STAThread] public static void Main(string[] args) {
         Console.OutputEncoding=new UTF8Encoding(false);Console.InputEncoding=new UTF8Encoding(false);
         try { SetProcessDpiAwarenessContext(new IntPtr(-4)); } catch { }
+        if(args.Contains("--foreground")) {
+            var state=foreground.Read();
+            Console.WriteLine(json.Serialize(new {state.Code,state.Reason,state.IsCodex,state.CanCapture,
+                windowId=state.Window.ToInt64().ToString(),foregroundWindow=state.ForegroundWindow.ToInt64().ToString()}));
+            return;
+        }
         bool once=args.Length>0&&args[0]=="--once";
         diagnostics=args.Contains("--diagnostics");
         do {

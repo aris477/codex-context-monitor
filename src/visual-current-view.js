@@ -8,6 +8,7 @@ import { promisify } from 'node:util';
 const run = promisify(execFile);
 const SOURCE = fileURLToPath(new URL('../native/VisualReader.cs', import.meta.url));
 const GEOMETRY_SOURCE = fileURLToPath(new URL('../native/SelectionGeometry.cs', import.meta.url));
+const FOREGROUND_SOURCE = fileURLToPath(new URL('../native/CodexForeground.cs', import.meta.url));
 const SOURCE_NAME = 'windows-sidebar-ocr';
 // OCR inserts spaces between Chinese characters and occasionally sees a leading
 // bracket in the title glyphs. Normalize both UI and stored labels identically;
@@ -43,7 +44,7 @@ export function matchVisualSample(sample, candidates, now = Date.now()) {
 async function buildReader(cacheDir) {
   const system = process.env.SystemRoot || 'C:\\Windows';
   const framework = path.join(system, 'Microsoft.NET', 'Framework64', 'v4.0.30319');
-  const source = Buffer.concat(await Promise.all([SOURCE, GEOMETRY_SOURCE].map((file) => readFile(file))));
+  const source = Buffer.concat(await Promise.all([SOURCE, GEOMETRY_SOURCE, FOREGROUND_SOURCE].map((file) => readFile(file))));
   const digest = createHash('sha256').update(source).digest('hex').slice(0, 16);
   const binary = path.join(cacheDir, `visual-reader-${digest}.exe`);
   try { await access(binary); return binary; } catch { /* Build from included source. */ }
@@ -56,7 +57,7 @@ async function buildReader(cacheDir) {
   ];
   await run(path.join(framework, 'csc.exe'), [
     '/nologo', '/codepage:65001', '/target:exe', '/platform:x64', `/out:${binary}`,
-    ...references.map((file) => `/r:${file}`), SOURCE, GEOMETRY_SOURCE,
+    ...references.map((file) => `/r:${file}`), SOURCE, GEOMETRY_SOURCE, FOREGROUND_SOURCE,
   ], { windowsHide: true, timeout: 30000, maxBuffer: 32768, env: { ...process.env, TEMP: cacheDir, TMP: cacheDir } });
   return binary;
 }

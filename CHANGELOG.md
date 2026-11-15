@@ -6,6 +6,9 @@ All notable changes to this project will be documented in this file. This projec
 
 ### Fixed
 
+- Distinguish official Codex package identity, main/child windows, owned popups, inaccessible process queries, and other foreground applications. Retry transient missing HWND/process metadata without reusing an old chat identity.
+- When a small floating layered/tool window temporarily takes focus, inspect the first ordinary visible window beneath it. Continue only for that verified Codex window; pause for another app, large overlays, hidden/minimized windows, and ambiguous desktop state. Add native foreground transition regressions.
+
 - Replace RGB fill-distance selection with relative grayscale geometry: paired edges, side boundaries, rounded-corner recovery, local noise, and peer-row comparison. Locate the sidebar from accessible control bounds when available, and verify visible selection candidates against the live title so hovering another row cannot steal identity. Remove frame identity caches.
 - Compile and hash both native sources. Add Windows-native geometry regressions for light/dark fills, gradients, noise, DPI scales, touching hover rows, and background false positives.
 
