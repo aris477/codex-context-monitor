@@ -129,6 +129,19 @@ public static class VisualReader {
         }
     }
     class TextLine { public string text; public double x,y,width,height; public double contrast,pairedEdges,sideEdges,peerExcess; internal bool accessible; }
+    static List<TextLine> DistinctPaintedRows(List<TextLine> rows,double u) {
+        var distinct=new List<TextLine>();
+        foreach(var row in rows) {
+            // OCR can split one label into multiple lines, each producing the
+            // same highlighted shape a pixel apart. Merge only observations of
+            // that SAME shape, never same-named rows at different positions.
+            bool duplicate=distinct.Any(other=>row.text==other.text
+                && Math.Abs(row.x-other.x)<=2*u && Math.Abs(row.y-other.y)<=2*u
+                && Math.Abs(row.width-other.width)<=2*u && Math.Abs(row.height-other.height)<=2*u);
+            if(!duplicate)distinct.Add(row);
+        }
+        return distinct;
+    }
     static bool InsideHeaderToolBar(AutomationElement text,System.Windows.Rect bounds) {
         var ancestor=TreeWalker.ControlViewWalker.GetParent(text);
         for(int depth=0;ancestor!=null && depth<8;depth++,ancestor=TreeWalker.ControlViewWalker.GetParent(ancestor)) {
@@ -226,7 +239,8 @@ public static class VisualReader {
             var root=AutomationElement.FromHandle(window);
             var items=root.FindAll(TreeScope.Descendants,new OrCondition(
                 new PropertyCondition(AutomationElement.ControlTypeProperty,ControlType.ToolBar),
-                new PropertyCondition(AutomationElement.ControlTypeProperty,ControlType.Button)));
+                new PropertyCondition(AutomationElement.ControlTypeProperty,ControlType.Button),
+                new PropertyCondition(AutomationElement.ControlTypeProperty,ControlType.ListItem)));
             var toolbars=new List<System.Windows.Rect>();
             foreach(AutomationElement item in items) {
                 var c=item.Current;var b=c.BoundingRectangle;
@@ -236,6 +250,27 @@ public static class VisualReader {
             }
             if(toolbars.Count!=1)return null;
             var layout=new SidebarLayout {Right=(int)(toolbars[0].Left-windowRect.Left-6*u),Source="windows-control-bounds"};
+            // Current Codex exposes the full painted chat row as a ListItem;
+            // its inner title button is narrower and supports ExpandCollapse
+            // instead of Invoke. Measure the row, not that inner button.
+            foreach(AutomationElement item in items) {
+                var c=item.Current;var b=c.BoundingRectangle;
+                if(c.IsOffscreen || c.ControlType!=ControlType.ListItem || String.IsNullOrWhiteSpace(c.Name)
+                    || b.Left<windowRect.Left || b.Right>windowRect.Left+layout.Right
+                    || b.Width<110*u || b.Height<18*u || b.Height>44*u
+                    || b.Top<windowRect.Top+100*u || b.Bottom>windowRect.Bottom-8*u)continue;
+                var parent=TreeWalker.ControlViewWalker.GetParent(item);
+                if(parent==null || parent.Current.ControlType!=ControlType.List)continue;
+                var labels=item.FindAll(TreeScope.Descendants,new PropertyCondition(AutomationElement.ControlTypeProperty,ControlType.Button));
+                bool namedChat=false;
+                foreach(AutomationElement label in labels) {
+                    var lc=label.Current;var lb=lc.BoundingRectangle;
+                    if(!lc.IsOffscreen && lc.Name==c.Name && b.Contains(lb)
+                        && label.GetSupportedPatterns().Contains(ScrollItemPattern.Pattern)) {namedChat=true;break;}
+                }
+                if(namedChat)layout.Rows.Add(new TextLine {text=c.Name,x=b.Left-windowRect.Left,y=b.Top-windowRect.Top,width=b.Width,height=b.Height,accessible=true});
+            }
+            if(layout.Rows.Count>0)layout.Source="windows-listitem-bounds";
             foreach(AutomationElement item in items) {
                 var c=item.Current;var b=c.BoundingRectangle;
                 if(c.IsOffscreen || c.ControlType!=ControlType.Button || String.IsNullOrWhiteSpace(c.Name)
@@ -245,6 +280,9 @@ public static class VisualReader {
                 var patterns=item.GetSupportedPatterns();
                 if(!patterns.Contains(InvokePattern.Pattern)||!patterns.Contains(ScrollItemPattern.Pattern)
                     || patterns.Contains(ExpandCollapsePattern.Pattern)||patterns.Contains(ScrollPattern.Pattern))continue;
+                // A renderer may expose both models. Do not count a title
+                // button again when its full ListItem row was already found.
+                if(layout.Rows.Any(row=>new System.Windows.Rect(windowRect.Left+row.x,windowRect.Top+row.y,row.width,row.height).Contains(b)))continue;
                 layout.Rows.Add(new TextLine {text=c.Name,x=b.Left-windowRect.Left,y=b.Top-windowRect.Top,width=b.Width,height=b.Height,accessible=true});
             }
             if(layout.Rows.Count>0)layout.Left=Math.Max(0,(int)layout.Rows.Min(row=>row.x)-(int)(8*u));
@@ -260,6 +298,11 @@ public static class VisualReader {
         if(width<500||height<400||width>12000||height>8000)return Missing("Codex 窗口尺寸不适合视觉识别");
         double u=Math.Max(1,GetDpiForWindow(window)/96.0);
         var layout=ReadSidebarLayout(window,r,u);
+        for(int retry=0;(layout==null || layout.Rows.Count==0) && retry<2;retry++) {
+            Thread.Sleep(40);
+            if(!foreground.StillCurrent(active))return Missing("前台窗口已切换，等待下一次识别");
+            layout=ReadSidebarLayout(window,r,u);
+        }
         int captureWidth=Math.Min(width,(int)(1200*u));
         using(var bitmap=new Bitmap(captureWidth,height,PixelFormat.Format32bppArgb)) {
             using(var g=Graphics.FromImage(bitmap))g.CopyFromScreen(r.Left,r.Top,0,0,new Size(captureWidth,height),CopyPixelOperation.SourceCopy);
@@ -299,6 +342,7 @@ public static class VisualReader {
             }
             var selected=layout.Rows.Where(row=>row.contrast>=5).ToList();
             ReadSelectedLabels(window,r,right,selected);
+            selected=DistinctPaintedRows(selected,u);
             TextLine headingLine=null;
             if(accessibleHeading==null) {
                 if(!EnsureOcr())return Missing("Windows OCR 语言组件不可用");
@@ -310,6 +354,14 @@ public static class VisualReader {
             if(!foreground.StillCurrent(active))return Missing("前台窗口已切换，等待下一次识别");
             if(accessibleHeading!=null) {
                 string recheckedHeading=ReadHeadingLabel(window,r,titleCrop,null);
+                // Chromium may briefly omit the title while its accessibility
+                // tree is being updated. Retry only a missing result, never a
+                // different title, and accept only a fresh matching read.
+                for(int retry=0;recheckedHeading==null && retry<2;retry++) {
+                    Thread.Sleep(40);
+                    if(!foreground.StillCurrent(active))return Missing("前台窗口已切换，等待下一次识别");
+                    recheckedHeading=ReadHeadingLabel(window,r,titleCrop,null);
+                }
                 if(recheckedHeading!=accessibleHeading) {
                     if(diagnostics)return new {status="unavailable",reason="聊天切换中，等待标题与选中行稳定",foregroundState=foregroundState,
                         firstTitle=accessibleHeading,recheckedTitle=recheckedHeading};

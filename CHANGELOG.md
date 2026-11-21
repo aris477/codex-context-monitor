@@ -6,6 +6,8 @@ All notable changes to this project will be documented in this file. This projec
 
 ### Fixed
 
+- Recognize full sidebar ListItem bounds in newer Codex builds, whose inner chat buttons expose ExpandCollapse instead of Invoke. Keep legacy button layouts and the independent geometry/title checks. Retry temporarily missing layout/title accessibility reads with bounded fresh checks, and merge only same-title candidates whose painted bounds differ by at most two DPI-scaled pixels; distinct same-named rows remain ambiguous. Add 14 native painted-row regressions.
+
 - Distinguish official Codex package identity, main/child windows, owned popups, inaccessible process queries, and other foreground applications. Retry transient missing HWND/process metadata without reusing an old chat identity.
 - When a small floating layered/tool window temporarily takes focus, inspect the first ordinary visible window beneath it. Continue only for that verified Codex window; pause for another app, large overlays, hidden/minimized windows, and ambiguous desktop state. Add native foreground transition regressions.
 
